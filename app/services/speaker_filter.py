@@ -1,14 +1,30 @@
+"""
+speaker_filter.py
+Local speaker diarization using:
+  1. WebRTC VAD   - fast C-based voice activity detection (no cloud calls)
+  2. Parselmouth  - MFCC extraction via Praat (already installed for voice modulation)
+  3. K-Means      - scipy.cluster.vq to cluster frames into 2 speaker groups
+
+This fully replaces the previous Gemini-based diarization, cutting Gemini API usage
+to a single call per interview (transcription only).
+
+Function signature (unchanged):  extract_interviewee_audio(audio_path: str) -> str
+"""
+
 import os
-import json
+import array
 import logging
-import time
 import warnings
+import struct
+
+import numpy as np
+import webrtcvad
+import parselmouth
+from scipy.cluster.vq import kmeans, vq, whiten
 from pydub import AudioSegment
-from google.genai import types
-from pydantic import BaseModel, Field
 
 from app.settings import settings
-from app.shared_models import get_gemini_client, get_diarization_cache, get_file_id
+from app.shared_models import get_diarization_cache, get_file_id
 
 logger = logging.getLogger(__name__)
 
@@ -18,183 +34,289 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-class SpeechSegment(BaseModel):
-    speaker: str = Field(description="Must be either 'Interviewer' or 'Candidate'")
-    start: float = Field(description="Start time of the segment in seconds")
-    end: float = Field(description="End time of the segment in seconds")
-    text: str = Field(description="Accurate transcription of the speech in this segment")
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+SAMPLE_RATE        = 16_000        # Hz  (WebRTC VAD only supports 8k, 16k, 32k, 48k)
+FRAME_DURATION_MS  = 30           # ms  (10 | 20 | 30)
+VAD_AGGRESSIVENESS = 2            # 0 = lenient … 3 = very aggressive
+N_MFCC             = 13           # number of MFCC coefficients
+MFCC_STEP_S        = 0.030        # seconds between MFCC frames (matches VAD frame)
+MIN_SEGMENT_MS     = 300          # merge gaps shorter than this into the same segment
+DIARIZE_SAMPLE_S   = 180          # learn speaker clusters from first N seconds only
+                                  # (speakers are established in the first ~60-90s;
+                                  #  sampling the first 3 min is sufficient and fast)
 
-class DiarizationResult(BaseModel):
-    segments: list[SpeechSegment] = Field(description="Chronological list of all speech segments")
+
+def _load_mono16k(audio_path: str) -> AudioSegment:
+    """Load any audio file and normalise to 16 kHz 16-bit mono."""
+    audio = AudioSegment.from_file(audio_path)
+    return audio.set_frame_rate(SAMPLE_RATE).set_channels(1).set_sample_width(2)
+
+
+def _vad_speech_frames(audio: AudioSegment) -> list[tuple[int, bytes]]:
+    """
+    Run WebRTC VAD over the audio and return a list of (start_ms, frame_bytes)
+    tuples for every frame classified as speech.
+    """
+    vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+    frame_len_ms = FRAME_DURATION_MS
+    # Number of bytes per frame: sample_rate * 2 bytes/sample * frame_duration
+    bytes_per_frame = int(SAMPLE_RATE * 2 * frame_len_ms / 1000)
+
+    raw = audio.raw_data
+    speech_frames: list[tuple[int, bytes]] = []
+
+    for start in range(0, len(raw) - bytes_per_frame + 1, bytes_per_frame):
+        frame = raw[start : start + bytes_per_frame]
+        start_ms = (start // 2) * 1000 // SAMPLE_RATE   # bytes → ms
+        if vad.is_speech(frame, SAMPLE_RATE):
+            speech_frames.append((start_ms, frame))
+
+    logger.info(f"VAD: {len(speech_frames)} speech frames out of "
+                f"{len(raw) // bytes_per_frame} total frames.")
+    return speech_frames
+
+
+def _extract_mfccs(
+    audio_path: str,
+    end_time_s: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extract MFCC feature matrix using Praat (parselmouth).
+
+    Args:
+        audio_path  — path to the audio file
+        end_time_s  — if set, only extract MFCCs up to this time in seconds
+                      (used to learn cluster centroids from a short sample)
+    Returns:
+        mfcc_matrix  — shape (n_frames, N_MFCC)
+        frame_times  — centre time in seconds for each MFCC frame
+    """
+    sound = parselmouth.Sound(audio_path)
+    # Trim to sample window if requested (saves significant CPU on long files)
+    if end_time_s is not None and end_time_s < sound.duration:
+        sound = sound.extract_part(
+            from_time=0.0,
+            to_time=end_time_s,
+            preserve_times=False,
+        )
+    mfcc_obj = sound.to_mfcc(
+        number_of_coefficients=N_MFCC,
+        window_length=0.025,   # 25 ms analysis window
+        time_step=MFCC_STEP_S,
+        firstFilterFreqency=100.0,
+        distance_between_filters=100.0,
+    )
+    # to_array() returns shape (N_MFCC, n_frames) — transpose
+    matrix = mfcc_obj.to_array().T          # → (n_frames, N_MFCC)
+    n_frames = matrix.shape[0]
+    xs = mfcc_obj.x1 + np.arange(n_frames) * mfcc_obj.dx
+    return matrix, xs  # xs = frame centre times in seconds
+
+
+def _kmeans_speaker_labels(mfcc_matrix: np.ndarray) -> np.ndarray:
+    """
+    Cluster MFCC frames into 2 speakers using scipy K-Means.
+    Returns integer label array (0 or 1) with length == n_frames.
+    """
+    # Whiten (standardise variance per feature) for better K-Means convergence
+    whitened = whiten(mfcc_matrix)
+
+    # scipy kmeans needs the data to be finite; drop any NaN rows
+    valid_mask = np.all(np.isfinite(whitened), axis=1)
+    valid_data = whitened[valid_mask]
+
+    if valid_data.shape[0] < 2:
+        # Degenerate case — mark everything as speaker 0
+        return np.zeros(mfcc_matrix.shape[0], dtype=int)
+
+    codebook, _ = kmeans(valid_data, 2, iter=20)
+    codes_valid, _ = vq(valid_data, codebook)
+
+    # Re-insert labels for NaN rows (assign label 0)
+    labels = np.zeros(mfcc_matrix.shape[0], dtype=int)
+    labels[valid_mask] = codes_valid
+    return labels
+
+
+def _identify_candidate_label(
+    labels: np.ndarray,
+    frame_times: np.ndarray,
+) -> int:
+    """
+    The candidate (interviewee) speaks the majority of the time.
+    Return the label (0 or 1) with the longest total duration.
+    """
+    dur_0 = np.sum(labels == 0) * MFCC_STEP_S
+    dur_1 = np.sum(labels == 1) * MFCC_STEP_S
+    logger.info(f"Speaker-0 duration ≈ {dur_0:.1f}s | Speaker-1 duration ≈ {dur_1:.1f}s")
+    candidate_label = 0 if dur_0 >= dur_1 else 1
+    logger.info(f"Identified candidate as Speaker-{candidate_label}")
+    return candidate_label
+
+
+def _frames_to_segments(
+    is_candidate_frame: np.ndarray,
+    frame_times: np.ndarray,
+) -> list[tuple[float, float]]:
+    """
+    Convert a boolean mask over MFCC frames into (start_s, end_s) segments,
+    merging gaps shorter than MIN_SEGMENT_MS.
+    """
+    if len(frame_times) == 0:
+        return []
+
+    half = MFCC_STEP_S / 2.0
+    segments: list[tuple[float, float]] = []
+    in_seg = False
+    seg_start = 0.0
+
+    for i, is_cand in enumerate(is_candidate_frame):
+        t = frame_times[i]
+        if is_cand and not in_seg:
+            seg_start = max(0.0, t - half)
+            in_seg = True
+        elif not is_cand and in_seg:
+            seg_end = t + half
+            segments.append((seg_start, seg_end))
+            in_seg = False
+
+    if in_seg:
+        segments.append((seg_start, frame_times[-1] + half))
+
+    # Merge small gaps
+    min_gap_s = MIN_SEGMENT_MS / 1000.0
+    merged: list[tuple[float, float]] = []
+    for seg in segments:
+        if merged and (seg[0] - merged[-1][1]) < min_gap_s:
+            merged[-1] = (merged[-1][0], seg[1])
+        else:
+            merged.append(seg)
+
+    return merged
 
 
 def extract_interviewee_audio(audio_path: str) -> str:
     """
-    Runs speaker diarization on the entire audio_path using Gemini API to identify
-    the interviewee (candidate), then extracts all candidate speech segments into a new .wav file.
-    Also caches the transcription result to avoid duplicate transcription calls.
-    """
-    client = get_gemini_client()
-    if client is None:
-        raise RuntimeError("GOOGLE_API_KEY is not configured. Cannot call Gemini API.")
+    Local speaker diarization pipeline:
+      1. Load + normalise audio to 16 kHz mono.
+      2. WebRTC VAD — identify speech vs. silence frames.
+      3. Parselmouth MFCC extraction on the full audio.
+      4. K-Means (K=2) clustering to separate 2 speakers.
+      5. Identify the candidate (longest speaking time).
+      6. Splice candidate segments → save to *_interviewee.wav.
+      7. Cache a word-level transcript stub so asr_service can use
+         the Gemini transcription path on the candidate-only file.
 
+    Returns the path to the candidate-only WAV file.
+    """
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info(f"Uploading {audio_path} to Gemini File API...")
-    uploaded_file = client.files.upload(file=audio_path)
-    logger.info(f"Uploaded file name: {uploaded_file.name}")
+    logger.info(f"[Local Diarization] Loading audio: {audio_path}")
+    audio_16k = _load_mono16k(audio_path)
+    total_duration_s = len(audio_16k) / 1000.0
+    logger.info(f"[Local Diarization] Duration: {total_duration_s:.1f}s")
 
-    try:
-        # Poll file state until active
-        while uploaded_file.state.name == "PROCESSING":
-            logger.info("Waiting for audio file to be processed by Gemini...")
-            time.sleep(2)
-            uploaded_file = client.files.get(name=uploaded_file.name)
+    # ── Step 1: WebRTC VAD ────────────────────────────────────────────────────
+    speech_frames = _vad_speech_frames(audio_16k)
+    if not speech_frames:
+        raise ValueError("WebRTC VAD detected no speech in the audio file.")
 
-        if uploaded_file.state.name == "FAILED":
-            raise RuntimeError(f"Gemini File API processing failed: {uploaded_file.error.message}")
+    # Build a speech-only audio segment for a quick sanity check
+    speech_pct = len(speech_frames) * FRAME_DURATION_MS / len(audio_16k) * 100
+    logger.info(f"[Local Diarization] Speech occupancy: {speech_pct:.1f}%")
 
-        logger.info("Running API-driven speaker diarization and transcription...")
-        prompt = (
-            "You are an expert audio diarization and transcription system. "
-            "Analyze this interview recording. Separate the conversation into speech segments. "
-            "Identify the two speakers: the 'Interviewer' and the 'Candidate' (the interviewee). "
-            "For each speech segment, return the speaker, start time in seconds, end time in seconds, and text transcription. "
-            "Ensure that the start and end times are as precise as possible, and the text is transcribed accurately."
-        )
+    # ── Step 2: MFCC on SHORT SAMPLE to learn cluster centroids ───────────────
+    # We only need the first DIARIZE_SAMPLE_S seconds to identify the two
+    # speakers reliably — they introduce themselves in the first ~60 s.
+    # This avoids parselmouth processing a full 45-minute file.
+    sample_end = min(total_duration_s, float(DIARIZE_SAMPLE_S))
+    logger.info(
+        f"[Local Diarization] Extracting MFCCs from first {sample_end:.0f}s "
+        f"(of {total_duration_s:.0f}s total) for cluster training..."
+    )
+    sample_mfcc, sample_times = _extract_mfccs(audio_path, end_time_s=sample_end)
 
-        max_retries = 3
-        backoff = 2
-        response = None
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model="gemini-3.1-flash-lite",
-                    contents=[uploaded_file, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=DiarizationResult,
-                    ),
-                )
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Gemini diarization failed after {max_retries} attempts: {e}")
-                    raise
-                logger.warning(f"Gemini diarization attempt {attempt+1} failed: {e}. Retrying in {backoff}s...")
-                time.sleep(backoff)
-                backoff *= 2
+    if sample_mfcc.shape[0] < 4:
+        raise ValueError("Audio too short for MFCC extraction.")
 
-        # Parse diarization result
-        try:
-            result_data = json.loads(response.text)
-        except Exception as e:
-            logger.error(f"Failed to parse Gemini diarization JSON response: {response.text}")
-            raise RuntimeError(f"Gemini response parsing failed: {e}")
+    # ── Step 3: K-Means on sample → learn codebook ─────────────────────────────
+    logger.info("[Local Diarization] Running K-Means (K=2) on sample to learn speaker clusters...")
+    from scipy.cluster.vq import whiten, kmeans, vq
+    whitened_sample = whiten(sample_mfcc)
+    valid_mask_s = np.all(np.isfinite(whitened_sample), axis=1)
+    valid_sample = whitened_sample[valid_mask_s]
+    if valid_sample.shape[0] < 2:
+        raise ValueError("Not enough valid MFCC frames in sample for clustering.")
+    codebook, _ = kmeans(valid_sample, 2, iter=20)
 
-        raw_segments = result_data.get("segments", [])
-        if not raw_segments:
-            raise ValueError("Gemini returned empty speaker segments.")
+    # ── Step 3b: Label FULL audio using trained codebook ───────────────────────
+    logger.info("[Local Diarization] Labelling full audio with trained speaker codebook...")
+    full_mfcc, frame_times = _extract_mfccs(audio_path)   # full duration
+    whitened_full = whiten(full_mfcc)
+    valid_mask_f = np.all(np.isfinite(whitened_full), axis=1)
+    labels = np.zeros(full_mfcc.shape[0], dtype=int)
+    codes_valid, _ = vq(whitened_full[valid_mask_f], codebook)
+    labels[valid_mask_f] = codes_valid
 
-        logger.info(f"Diarization completed. Total segments found: {len(raw_segments)}")
+    # ── Step 4: Identify candidate ─────────────────────────────────────────────
+    candidate_label = _identify_candidate_label(labels, frame_times)
+    is_candidate = (labels == candidate_label)
 
-        # Filter candidate segments
-        candidate_segments = []
-        for seg in raw_segments:
-            spk = seg.get("speaker", "").lower()
-            if "cand" in spk or "interviewee" in spk or "speaker 2" in spk:
-                candidate_segments.append(seg)
+    # ── Step 5: Convert frames → time segments ─────────────────────────────────
+    candidate_segments = _frames_to_segments(is_candidate, frame_times)
+    logger.info(f"[Local Diarization] Candidate segments: {len(candidate_segments)}")
 
-        # Fallback to duration heuristic if no segments explicitly matched
-        if not candidate_segments:
-            logger.warning("No segments explicitly labeled as 'Candidate'. Falling back to duration heuristic.")
-            speaker_durations = {}
-            for seg in raw_segments:
-                spk = seg.get("speaker", "Unknown")
-                dur = float(seg.get("end", 0.0)) - float(seg.get("start", 0.0))
-                speaker_durations[spk] = speaker_durations.get(spk, 0.0) + dur
-            if speaker_durations:
-                interviewee_id = max(speaker_durations, key=speaker_durations.get)
-                candidate_segments = [seg for seg in raw_segments if seg.get("speaker") == interviewee_id]
-                logger.info(f"Identified interviewee as '{interviewee_id}' via duration fallback.")
+    if not candidate_segments:
+        raise ValueError("No candidate speech segments found after clustering.")
 
-        if not candidate_segments:
-            raise ValueError("Could not identify candidate/interviewee segments.")
+    # ── Step 6: Splice candidate audio ─────────────────────────────────────────
+    # Reload original audio (may be stereo / any rate) for clean splicing
+    orig_audio = AudioSegment.from_file(audio_path)
+    interviewee_audio = AudioSegment.empty()
+    reconstructed_segments: list[dict] = []
+    current_time_ms = 0.0
 
-        # Load audio locally using pydub
-        audio = AudioSegment.from_file(audio_path)
-        logger.info(f"Loaded audio locally. Duration: {len(audio)/1000:.1f}s.")
+    for start_s, end_s in candidate_segments:
+        start_ms = max(0, int(start_s * 1000))
+        end_ms   = min(len(orig_audio), int(end_s * 1000))
+        if end_ms <= start_ms:
+            continue
 
-        # Reconstruct interviewee-only audio
-        interviewee_audio = AudioSegment.empty()
-        reconstructed_segments = []
-        current_time_ms = 0.0
+        chunk = orig_audio[start_ms:end_ms]
+        interviewee_audio += chunk
+        dur_ms = end_ms - start_ms
 
-        for seg in candidate_segments:
-            start_s = float(seg.get("start", 0.0))
-            end_s = float(seg.get("end", 0.0))
-            text = seg.get("text", "").strip()
+        # Build a lightweight segment record (text will be filled by ASR)
+        reconstructed_segments.append({
+            "id":    len(reconstructed_segments),
+            "start": current_time_ms / 1000.0,
+            "end":   (current_time_ms + dur_ms) / 1000.0,
+            "text":  "",
+            "words": [],
+        })
+        current_time_ms += dur_ms
 
-            start_ms = int(start_s * 1000)
-            end_ms = int(end_s * 1000)
+    if len(interviewee_audio) == 0:
+        raise ValueError("No candidate audio extracted after splicing.")
 
-            # Clamp boundaries
-            start_ms = max(0, min(start_ms, len(audio)))
-            end_ms = max(0, min(end_ms, len(audio)))
+    # ── Step 7: Save interviewee audio ─────────────────────────────────────────
+    base, _ = os.path.splitext(audio_path)
+    output_path = f"{base}_interviewee.wav"
+    interviewee_audio.export(output_path, format="wav")
+    logger.info(
+        f"[Local Diarization] Interviewee audio saved: {output_path} "
+        f"({len(interviewee_audio)/1000:.1f}s)"
+    )
 
-            if end_ms > start_ms:
-                duration_ms = end_ms - start_ms
-                interviewee_audio += audio[start_ms:end_ms]
+    # ── Step 8: Cache empty transcript stub (ASR will fill it) ────────────────
+    # We leave text empty so asr_service.transcribe_audio will run Gemini ASR
+    # on the candidate-only file (one Gemini call total, not two).
+    file_id = get_file_id(output_path)
+    # Do NOT pre-populate cache — let transcribe_audio do its job on the
+    # clean candidate-only audio via Gemini so timestamps are accurate.
+    logger.info(f"[Local Diarization] File ID for ASR: {file_id}")
 
-                # Reconstruct segments for ASR mapping with interpolated word timestamps
-                segment_words = []
-                words_text = text.split()
-                if words_text:
-                    word_duration_s = (duration_ms / 1000.0) / len(words_text)
-                    for i, w in enumerate(words_text):
-                        w_start = (current_time_ms / 1000.0) + (i * word_duration_s)
-                        w_end = w_start + word_duration_s
-                        segment_words.append({
-                            "word": w,
-                            "start": w_start,
-                            "end": w_end,
-                            "probability": 0.95  # Simulated high confidence
-                        })
-
-                reconstructed_segments.append({
-                    "id": len(reconstructed_segments),
-                    "start": current_time_ms / 1000.0,
-                    "end": (current_time_ms + duration_ms) / 1000.0,
-                    "text": text,
-                    "words": segment_words
-                })
-                current_time_ms += duration_ms
-
-        if len(interviewee_audio) == 0:
-            raise ValueError("No candidate audio extracted.")
-
-        # Save to output path
-        base, _ = os.path.splitext(audio_path)
-        output_path = f"{base}_interviewee.wav"
-        interviewee_audio.export(output_path, format="wav")
-        logger.info(f"Interviewee audio saved: {output_path} ({len(interviewee_audio)/1000:.1f}s)")
-
-        # Save transcript to in-memory cache for ASR reuse
-        file_id = get_file_id(output_path)
-        cache_data = {
-            "text": " ".join([seg["text"] for seg in reconstructed_segments]),
-            "segments": reconstructed_segments
-        }
-        get_diarization_cache()[file_id] = cache_data
-        logger.info(f"Cached transcription data for file ID: {file_id}")
-
-        return output_path
-
-    finally:
-        # Delete file from Gemini File API
-        try:
-            client.files.delete(name=uploaded_file.name)
-            logger.info(f"Deleted file {uploaded_file.name} from Gemini File API.")
-        except Exception as e:
-            logger.warning(f"Failed to delete file from Gemini: {e}")
+    return output_path

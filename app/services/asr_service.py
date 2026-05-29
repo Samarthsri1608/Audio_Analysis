@@ -1,141 +1,166 @@
+"""
+asr_service.py
+Local ASR using faster-whisper (CTranslate2 backend).
+
+Replaces the previous Gemini-based transcription — zero API calls.
+
+Model selection (via env var WHISPER_MODEL, default "small"):
+  tiny   ~75 MB  – fastest, lower accuracy
+  base   ~145 MB – good balance
+  small  ~465 MB – recommended for production (default)
+  medium ~1.5 GB – high accuracy, slower
+  large  ~3.0 GB – best accuracy, slowest
+
+Model files are downloaded once to ~/.cache/huggingface/hub/ (or
+WHISPER_CACHE_DIR env var) and reused across runs.
+In Docker, mount that directory as a volume so the image stays small.
+
+Output format is identical to the previous Gemini-based service so
+all downstream feature extractors remain unchanged.
+"""
+
 import logging
 import os
-import time
-import json
-from google.genai import types
-from pydantic import BaseModel, Field
+from functools import lru_cache
 
-from app.shared_models import get_gemini_client, get_diarization_cache, get_file_id
+from faster_whisper import WhisperModel
+
+from app.shared_models import get_diarization_cache, get_file_id
 
 logger = logging.getLogger(__name__)
 
-class TranscribeSegment(BaseModel):
-    start: float = Field(description="Start time of the segment in seconds")
-    end: float = Field(description="End time of the segment in seconds")
-    text: str = Field(description="Accurate transcription of this segment")
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuration  (override via environment variables)
+# ──────────────────────────────────────────────────────────────────────────────
+WHISPER_MODEL     = os.getenv("WHISPER_MODEL", "base")        # tiny/base/small/medium/large
+WHISPER_DEVICE    = os.getenv("WHISPER_DEVICE", "cpu")         # "cpu" or "cuda"
+WHISPER_COMPUTE   = os.getenv("WHISPER_COMPUTE", "int8")       # "int8" keeps RAM low on CPU
+WHISPER_CACHE_DIR = os.getenv("WHISPER_CACHE_DIR", None)       # None → HF default cache
+WHISPER_LANGUAGE  = os.getenv("WHISPER_LANGUAGE", "en")        # fix language → faster
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "2"))   # 2 = fast greedy; 5 = accurate
+WHISPER_CPU_THREADS = int(os.getenv("WHISPER_CPU_THREADS", "2")) # per-worker CPU threads
 
-class TranscriptionResultSchema(BaseModel):
-    segments: list[TranscribeSegment] = Field(description="Chronological list of all transcribed segments")
+
+@lru_cache(maxsize=1)
+def _get_whisper_model() -> WhisperModel:
+    """
+    Load the WhisperModel once and cache it in memory.
+    lru_cache ensures a single instance is shared across all calls
+    (avoids reloading ~500 MB from disk for every interview).
+    """
+    logger.info(
+        f"Loading Whisper model '{WHISPER_MODEL}' "
+        f"[device={WHISPER_DEVICE}, compute={WHISPER_COMPUTE}]..."
+    )
+    model = WhisperModel(
+        WHISPER_MODEL,
+        device=WHISPER_DEVICE,
+        compute_type=WHISPER_COMPUTE,
+        download_root=WHISPER_CACHE_DIR,
+        cpu_threads=WHISPER_CPU_THREADS,   # limits per-instance thread consumption
+        num_workers=1,                     # 1 = use single internal worker thread
+    )
+    logger.info("Whisper model loaded and cached.")
+    return model
 
 
 def transcribe_audio(file_path: str) -> dict:
     """
-    Transcribes an audio file. Checks the in-memory diarization cache first.
-    If not found, uploads the file to the Gemini API and transcribes it directly.
+    Transcribe an audio file using faster-whisper (local, no API calls).
+
+    Checks the in-memory diarization cache first (populated by speaker_filter
+    in earlier pipeline stages).  On a cache miss, runs whisper transcription
+    with word-level timestamps enabled.
+
+    Returns a dict with the same shape as the previous Gemini-based service:
+    {
+        "text": "<full transcript>",
+        "segments": [
+            {
+                "id": 0,
+                "start": 0.0,
+                "end": 4.2,
+                "text": "Hello world",
+                "words": [
+                    {"word": "Hello", "start": 0.0, "end": 0.5, "probability": 0.98},
+                    {"word": "world", "start": 0.5, "end": 1.1, "probability": 0.97},
+                ]
+            },
+            ...
+        ]
+    }
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Audio file not found: {file_path}")
 
-    # 1. Check cache first
+    # ── Cache check ────────────────────────────────────────────────────────────
     file_id = get_file_id(file_path)
     cache = get_diarization_cache()
     if file_id in cache:
         logger.info(f"ASR Cache HIT for file ID: {file_id}")
         return cache[file_id]
 
-    logger.info(f"ASR Cache MISS for file ID: {file_id}. Running direct Gemini transcription...")
+    logger.info(f"ASR Cache MISS — running faster-whisper on: {file_path}")
 
-    # 2. Call Gemini API directly
-    client = get_gemini_client()
-    if client is None:
-        raise RuntimeError("GOOGLE_API_KEY is not configured. Cannot call Gemini API.")
+    # ── Transcribe ─────────────────────────────────────────────────────────────
+    model = _get_whisper_model()
 
-    logger.info(f"Uploading {file_path} to Gemini File API for ASR...")
-    uploaded_file = client.files.upload(file=file_path)
-    logger.info(f"Uploaded ASR file name: {uploaded_file.name}")
+    segments_iter, info = model.transcribe(
+        file_path,
+        language=WHISPER_LANGUAGE,
+        beam_size=WHISPER_BEAM_SIZE,
+        word_timestamps=True,          # enables per-word start/end times
+        vad_filter=True,               # skip silent regions automatically
+        vad_parameters=dict(
+            min_silence_duration_ms=500,   # skip pauses > 500ms (was 300ms)
+            speech_pad_ms=200,
+        ),
+        condition_on_previous_text=False,  # prevents hallucination loops on long audio
+        temperature=0.0,                   # greedy decode — fastest, deterministic
+    )
 
-    try:
-        # Poll file state
-        while uploaded_file.state.name == "PROCESSING":
-            logger.info("Waiting for ASR file to be processed by Gemini...")
-            time.sleep(2)
-            uploaded_file = client.files.get(name=uploaded_file.name)
+    logger.info(
+        f"Detected language '{info.language}' "
+        f"(probability {info.language_probability:.2f}), "
+        f"duration {info.duration:.1f}s"
+    )
 
-        if uploaded_file.state.name == "FAILED":
-            raise RuntimeError(f"Gemini File API ASR processing failed: {uploaded_file.error.message}")
+    reconstructed_segments = []
+    full_text_parts = []
 
-        logger.info("Running API-driven transcription...")
-        prompt = (
-            "You are an expert audio transcription system. "
-            "Transcribe the spoken content in this audio recording. "
-            "Segment the transcription and provide accurate start and end timestamps in seconds for each segment."
-        )
+    for seg in segments_iter:   # generator — lazy evaluation
+        text = (seg.text or "").strip()
+        if not text:
+            continue
 
-        max_retries = 3
-        backoff = 2
-        response = None
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model="gemini-3.1-flash-lite",
-                    contents=[uploaded_file, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=TranscriptionResultSchema,
-                    ),
-                )
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Gemini transcription failed after {max_retries} attempts: {e}")
-                    raise
-                logger.warning(f"Gemini transcription attempt {attempt+1} failed: {e}. Retrying in {backoff}s...")
-                time.sleep(backoff)
-                backoff *= 2
+        full_text_parts.append(text)
 
-        try:
-            result_data = json.loads(response.text)
-        except Exception as e:
-            logger.error(f"Failed to parse Gemini ASR JSON response: {response.text}")
-            raise RuntimeError(f"Gemini ASR response parsing failed: {e}")
+        # Word-level timestamps
+        segment_words = []
+        if seg.words:
+            for w in seg.words:
+                segment_words.append({
+                    "word":        w.word.strip(),
+                    "start":       round(w.start, 3),
+                    "end":         round(w.end, 3),
+                    "probability": round(w.probability, 4),
+                })
 
-        raw_segments = result_data.get("segments", [])
-        reconstructed_segments = []
-        full_text_list = []
+        reconstructed_segments.append({
+            "id":    len(reconstructed_segments),
+            "start": round(seg.start, 3),
+            "end":   round(seg.end, 3),
+            "text":  text,
+            "words": segment_words,
+        })
 
-        for seg in raw_segments:
-            start_s = float(seg.get("start", 0.0))
-            end_s = float(seg.get("end", 0.0))
-            text = seg.get("text", "").strip()
+    result = {
+        "text":     " ".join(full_text_parts),
+        "segments": reconstructed_segments,
+    }
 
-            if not text:
-                continue
-
-            full_text_list.append(text)
-            duration_s = end_s - start_s
-
-            # Interpolate word-level timestamps to match the expected format
-            segment_words = []
-            words_text = text.split()
-            if words_text and duration_s > 0:
-                word_duration_s = duration_s / len(words_text)
-                for i, w in enumerate(words_text):
-                    w_start = start_s + (i * word_duration_s)
-                    w_end = w_start + word_duration_s
-                    segment_words.append({
-                        "word": w,
-                        "start": w_start,
-                        "end": w_end,
-                        "probability": 0.95
-                    })
-
-            reconstructed_segments.append({
-                "id": len(reconstructed_segments),
-                "start": start_s,
-                "end": end_s,
-                "text": text,
-                "words": segment_words
-            })
-
-        return {
-            "text": " ".join(full_text_list),
-            "segments": reconstructed_segments
-        }
-
-    finally:
-        # Delete file from Gemini
-        try:
-            client.files.delete(name=uploaded_file.name)
-            logger.info(f"Deleted file {uploaded_file.name} from Gemini File API.")
-        except Exception as e:
-            logger.warning(f"Failed to delete file from Gemini: {e}")
+    logger.info(
+        f"Transcription complete: {len(reconstructed_segments)} segments, "
+        f"{len(full_text_parts)} non-empty."
+    )
+    return result

@@ -12,4 +12,9 @@ google-genai>=1.0.0
 opentelemetry-api>=1.24.0
 opentelemetry-sdk>=1.24.0
 opentelemetry-instrumentation-fastapi>=0.45b0
+# Local speaker diarization (replaces Gemini diarization)
+webrtcvad-wheels>=2.0.14
+scipy>=1.13.0
+# Local ASR (replaces Gemini transcription)
+faster-whisper>=1.0.0
 
