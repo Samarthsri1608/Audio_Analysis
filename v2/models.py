@@ -4,7 +4,9 @@ models.py — Pydantic schemas for V2 pipeline inputs and outputs.
 Updated for Zeko Unified Communication Framework v1:
 - RawFeatures extended with System A scoring fields
 - SkillsAssessment added for System A output
-- AnalysisResult extended to include skills assessment
+- PersonalityResult: System B (style/archetype) endpoint response
+- CommunicationResult: System A (skills scoring) endpoint response
+- FeatureCacheEntry: lightweight cache object storing only raw features
 """
 from __future__ import annotations
 
@@ -55,6 +57,20 @@ class RawFeatures(BaseModel):
 
     # ── ASR quality ────────────────────────────────────────────────────────────
     intel_confidence: float = Field(0.75, ge=0, le=1)  # F05 — bias-corrected Whisper confidence
+
+
+# ── Feature cache entry ───────────────────────────────────────────────────────
+
+class FeatureCacheEntry(BaseModel):
+    """
+    Lightweight cache object stored after feature extraction.
+    Only raw features + minimal metadata — no evaluation results.
+    Evaluation (System A / System B) is computed on demand per endpoint.
+    """
+    response_id: str
+    raw_features: RawFeatures
+    transcript: str = ""
+    duration_ms: float = 0.0
 
 
 # ── System A — Skills Assessment (5 axes, 0–5 each) ──────────────────────────
@@ -146,32 +162,49 @@ class StyleProfile(BaseModel):
     )
 
 
-# ── Full analysis result ──────────────────────────────────────────────────────
+# ── Endpoint response models ──────────────────────────────────────────────────
 
-class AnalysisResult(BaseModel):
+class PersonalityResult(BaseModel):
+    """
+    Response model for GET /v2/analyse/{response_id}/personality.
+
+    System B output: HOW the candidate communicates — style, archetype blend,
+    and role-fit signals. Non-evaluative (no good/bad archetype).
+    """
     response_id: str
-    status: str                                  # "success" | "error"
+    status: str                          # "success" | "error"
     error: Optional[str] = None
     duration_ms: float = 0.0
     transcript: Optional[str] = None
-    raw_features: Optional[RawFeatures] = None
 
-    # System A — Skills Engine
-    skills: Optional[SkillsAssessment] = None
-
-    # System B — Style Engine (full structured profile)
+    # System B outputs
     style_profile: Optional[StyleProfile] = None
-
-    # Legacy flat fields kept for backward-compatibility with v2 consumers
-    # Prefer style_profile for new integrations
     signals: Optional[CommunicationSignals] = None
     archetype_blend: Optional[ArchetypeBlend] = None
     dominant_archetype: Optional[str] = None
 
+    # Optional LLM description
     description: Optional[str] = None
 
 
-# ── Request model ─────────────────────────────────────────────────────────────
+class CommunicationResult(BaseModel):
+    """
+    Response model for GET /v2/analyse/{response_id}/communication.
+
+    System A output: HOW WELL the candidate communicates — 5-axis skills
+    scoring, composite score, and human review flags.
+    """
+    response_id: str
+    status: str                          # "success" | "error"
+    error: Optional[str] = None
+    duration_ms: float = 0.0
+    transcript: Optional[str] = None
+
+    # System A output
+    skills: Optional[SkillsAssessment] = None
+
+
+# ── Request models ────────────────────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
     response_id: str
