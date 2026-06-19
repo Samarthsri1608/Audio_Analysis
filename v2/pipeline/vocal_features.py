@@ -50,21 +50,41 @@ def pitch_variation_cv(wav_path: str) -> float:
     absolute pitch swings, which raw Hz would misclassify as monotone.
     The CV captures *relative* expressiveness independent of baseline pitch.
 
+    A speech-frequency search range (75Hz - 400Hz) and a rolling median filter
+    are applied to remove octave-tracking jumps and background noise spikes.
+    CV is capped at a physically realistic limit of 0.45 to prevent tracking errors
+    from artificially driving up scores.
+
     Returns:
-        float — CV ratio (typically 0.15–0.60). Higher = more expressive.
+        float — CV ratio (typically 0.15–0.45). Higher = more expressive.
         0.0 if insufficient voiced frames.
     """
     try:
         y, sr, librosa = _load_audio(wav_path)
-        f0 = librosa.yin(y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7"))
+        # Narrow frequency search range to typical human speech (75Hz to 400Hz)
+        # to filter out upper harmonics and octave jump tracking errors
+        f0 = librosa.yin(y, fmin=75.0, fmax=400.0)
         voiced = f0[f0 > 0]
         if len(voiced) < 10:
             return 0.0
-        f0_mean = float(np.mean(voiced))
-        f0_std = float(np.std(voiced))
+
+        # Apply a 5-frame median filter to smooth out sudden transient tracking spikes
+        kernel_size = 5
+        half_k = kernel_size // 2
+        padded = np.pad(voiced, half_k, mode='edge')
+        smoothed = np.zeros_like(voiced)
+        for i in range(len(voiced)):
+            smoothed[i] = np.median(padded[i : i + kernel_size])
+
+        f0_mean = float(np.mean(smoothed))
+        f0_std = float(np.std(smoothed))
         if f0_mean <= 0:
             return 0.0
         cv = f0_std / f0_mean
+        
+        # Cap pitch CV at a realistic physical limit for speech to prevent remaining artifacts
+        cv = min(cv, 0.45)
+        
         return round(float(cv), 4)
     except Exception as exc:
         logger.warning("pitch_variation_cv failed: %s", exc)
@@ -189,12 +209,21 @@ def stress_markers(wav_path: str) -> float:
 
         stress_fry = max(0.0, min(1.0, (energy_ratio - 0.5) / 2.0))
 
-        f0 = librosa.yin(y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7"))
+        f0 = librosa.yin(y, fmin=75.0, fmax=400.0)
         voiced = f0[f0 > 0]
         if len(voiced) > 10:
-            f0_mean = float(np.mean(voiced))
-            f0_std = float(np.std(voiced))
+            # Apply same median filter to smooth out octave jump tracking errors
+            kernel_size = 5
+            half_k = kernel_size // 2
+            padded = np.pad(voiced, half_k, mode='edge')
+            smoothed = np.zeros_like(voiced)
+            for i in range(len(voiced)):
+                smoothed[i] = np.median(padded[i : i + kernel_size])
+
+            f0_mean = float(np.mean(smoothed))
+            f0_std = float(np.std(smoothed))
             cv = (f0_std / f0_mean) if f0_mean > 0 else 0.0
+            cv = min(cv, 0.45)
             stress_tremor = max(0.0, min(1.0, (cv - 0.05) / 0.35))
         else:
             stress_tremor = 0.5
