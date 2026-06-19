@@ -13,7 +13,7 @@ logging.basicConfig(
     ]
 )
 
-API_URL = "http://127.0.0.1:8001/v2/analyze"
+API_URL = "http://127.0.0.1:8001/v2/analyze/{response_id}/communication"
 TEST_FILE = "testing_interviews.json"
 OUTPUT_FILE = "new_framework_results.jsonl"
 
@@ -64,34 +64,62 @@ def main():
             logging.info(f"[{idx}/{total_cases}] Processing {response_id}...")
             start_time = time.time()
             
-            payload = {
-                "response_id": response_id,
-                "include_description": True,
-                "role_profile": "default",
-                "style_role": "default"
-            }
-            
             try:
-                # 30-minute timeout to allow for heavy local model downloading and execution
-                response = requests.post(API_URL, json=payload, timeout=1800)
-                elapsed = time.time() - start_time
+                # Call the Personality (System B) endpoint
+                pers_url = f"http://127.0.0.1:8001/v2/analyse/{response_id}/personality"
+                pers_params = {"include_description": "true", "style_role": "default"}
                 
-                if response.status_code == 200:
-                    result = response.json()
-                    out_f.write(json.dumps(result) + "\n")
-                    out_f.flush()
-                    logging.info(f"  → Success in {elapsed:.2f}s")
-                else:
-                    err_text = response.text[:300]
-                    logging.error(f"  → HTTP {response.status_code}: {err_text}")
-                    # Write failure record so we know it was processed but failed
+                # Call the Communication (System A) endpoint
+                comm_url = f"http://127.0.0.1:8001/v2/analyse/{response_id}/communication"
+                comm_params = {"role_profile": "default"}
+
+                # 30-minute timeout to allow for heavy local model downloading and execution
+                response_pers = requests.get(pers_url, params=pers_params, timeout=1800)
+                
+                if response_pers.status_code != 200:
+                    err_text = response_pers.text[:300]
+                    logging.error(f"  → Personality HTTP {response_pers.status_code}: {err_text}")
                     fail_record = {
                         "response_id": response_id,
                         "status": "error",
-                        "error": f"HTTP {response.status_code}: {err_text}"
+                        "error": f"Personality HTTP {response_pers.status_code}: {err_text}"
                     }
                     out_f.write(json.dumps(fail_record) + "\n")
                     out_f.flush()
+                    continue
+
+                response_comm = requests.get(comm_url, params=comm_params, timeout=1800)
+                
+                if response_comm.status_code != 200:
+                    err_text = response_comm.text[:300]
+                    logging.error(f"  → Communication HTTP {response_comm.status_code}: {err_text}")
+                    fail_record = {
+                        "response_id": response_id,
+                        "status": "error",
+                        "error": f"Communication HTTP {response_comm.status_code}: {err_text}"
+                    }
+                    out_f.write(json.dumps(fail_record) + "\n")
+                    out_f.flush()
+                    continue
+
+                elapsed = time.time() - start_time
+                
+                # Merge the results from both endpoints to preserve backward compatibility for downstream analysis
+                pers_data = response_pers.json()
+                comm_data = response_comm.json()
+                
+                merged_result = {**pers_data, **comm_data}
+                # Ensure status is successfully unified
+                if pers_data.get("status") == "success" and comm_data.get("status") == "success":
+                    merged_result["status"] = "success"
+                else:
+                    merged_result["status"] = "error"
+                    merged_result["error"] = pers_data.get("error") or comm_data.get("error")
+
+                out_f.write(json.dumps(merged_result) + "\n")
+                out_f.flush()
+                logging.info(f"  → Success in {elapsed:.2f}s")
+
             except requests.exceptions.Timeout:
                 logging.error(f"  → Request timed out for {response_id}")
                 fail_record = {
