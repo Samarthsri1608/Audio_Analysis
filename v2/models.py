@@ -57,6 +57,7 @@ class RawFeatures(BaseModel):
 
     # ── ASR quality ────────────────────────────────────────────────────────────
     intel_confidence: float = Field(0.75, ge=0, le=1)  # F05 — bias-corrected Whisper confidence
+    is_short_duration: bool = False
 
 
 # ── Feature cache entry ───────────────────────────────────────────────────────

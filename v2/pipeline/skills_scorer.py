@@ -159,14 +159,21 @@ def _composite_to_band(score: float) -> str:
 def _axis_confidence(raw: RawFeatures, axis: str) -> tuple[float, list[str]]:
     """
     Confidence is reduced when:
-    - Audio duration < 10 min (too little signal)
+    - Audio duration is short (individual questions < 1 min, or overall duration proxy < 10 min)
     - ASR intel_confidence < 0.65 (poor transcription quality, post-correction)
     - Feature value is extreme outlier (handled per-axis below)
     """
     confidence = 1.0
     flags: list[str] = []
 
-    duration_min = raw.speech_rate_wpm / max(raw.total_words, 1) * raw.total_words / 60.0
+    # Corrected duration proxy in minutes: total words / speech rate (WPM)
+    duration_min = raw.total_words / max(raw.speech_rate_wpm, 1.0)
+    
+    # Apply short duration check if overall proxy is < 10 min OR if >60% of questions were < 1 min
+    if duration_min < 10.0 or raw.is_short_duration:
+        confidence -= 0.15
+        flags.append("short_duration")
+
     if raw.total_words < 100:
         confidence -= 0.30
         flags.append("short_transcript")

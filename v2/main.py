@@ -238,6 +238,10 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
         for k in avg_feats:
             avg_feats[k] = round(avg_feats[k] / num_q, 4)
 
+        # Count questions shorter than 1 minute (60 seconds)
+        num_short_questions = sum(1 for q in question_results if q.get("duration_s", 0.0) < 60.0)
+        is_short_duration = (num_short_questions / max(num_q, 1)) > 0.60
+
         raw = RawFeatures(
             # Summed / recalculated text stats
             total_words=float(sum_total_words),
@@ -272,6 +276,7 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
 
             # Averaged ASR confidence
             intel_confidence=avg_feats["intel_confidence"],
+            is_short_duration=is_short_duration,
         )
 
         entry = FeatureCacheEntry(
