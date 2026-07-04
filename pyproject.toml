@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "assemblyai>=0.64.21",
     "fastapi>=0.111.0",
     "faster-whisper>=1.2.1",
     "graphifyy>=0.8.20",

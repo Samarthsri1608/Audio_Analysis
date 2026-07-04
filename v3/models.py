@@ -1,5 +1,5 @@
 """
-models.py — Pydantic schemas for V2 pipeline inputs and outputs.
+models.py — Pydantic schemas for V3 pipeline inputs and outputs.
 
 Updated for Zeko Unified Communication Framework v1:
 - RawFeatures extended with System A scoring fields
@@ -7,10 +7,11 @@ Updated for Zeko Unified Communication Framework v1:
 - PersonalityResult: System B (style/archetype) endpoint response
 - CommunicationResult: System A (skills scoring) endpoint response
 - FeatureCacheEntry: lightweight cache object storing only raw features
+- QuestionAnalysis and InternalReviewResult added for internal proctor review
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Any
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -56,7 +57,8 @@ class RawFeatures(BaseModel):
     voiced_fraction: float = Field(0.0, ge=0, le=1)   # fraction of audio that is speech
 
     # ── ASR quality ────────────────────────────────────────────────────────────
-    intel_confidence: float = Field(0.75, ge=0, le=1)  # F05 — bias-corrected Whisper confidence
+    # V3: AssemblyAI returns true per-word confidence (no +0.06 offset needed)
+    intel_confidence: float = Field(0.80, ge=0, le=1)  # F05 — AssemblyAI per-word confidence
     is_short_duration: bool = False
 
 
@@ -72,6 +74,7 @@ class FeatureCacheEntry(BaseModel):
     raw_features: RawFeatures
     transcript: str = ""
     duration_ms: float = 0.0
+    question_results: list[Any] = Field(default_factory=list)
 
 
 # ── System A — Skills Assessment (5 axes, 0–5 each) ──────────────────────────
@@ -165,9 +168,33 @@ class StyleProfile(BaseModel):
 
 # ── Endpoint response models ──────────────────────────────────────────────────
 
+class AnalysisResult(BaseModel):
+    raw_features: dict[str, Any] = Field(default_factory=dict)
+    observed_signals: list[str] = Field(default_factory=list)
+    transcription_based_signals: list[str] = Field(default_factory=list)
+    behavioural_signals: list[str] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    friction_points: list[str] = Field(default_factory=list)
+    summary: str = ""
+    evidence_notes: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class CommunicationSummary(BaseModel):
+    """Two-line communication summary without raw feature disclosure."""
+    summary: list[str] = Field(default_factory=list)
+
+    @field_validator("summary")
+    @classmethod
+    def _validate_summary(cls, value: list[str]) -> list[str]:
+        lines = [str(line).strip() for line in value if str(line).strip()]
+        if len(lines) != 2:
+            raise ValueError("summary must contain exactly two non-empty lines")
+        return lines
+
 class PersonalityResult(BaseModel):
     """
-    Response model for GET /v2/analyse/{response_id}/personality.
+    Response model for GET /v3/analyse/{response_id}/personality.
 
     System B output: HOW the candidate communicates — style, archetype blend,
     and role-fit signals. Non-evaluative (no good/bad archetype).
@@ -190,29 +217,37 @@ class PersonalityResult(BaseModel):
 
 class CommunicationResult(BaseModel):
     """
-    Response model for GET /v2/analyse/{response_id}/communication.
+    Response model for GET /v3/analyse/{response_id}/communication.
 
     V2 public contract: compact two-line summary, tags, and schema version only.
     """
     response_id: str
     status: str                          # "success" | "error"
     duration: float = Field(0.0, ge=0)
-    result: "CommunicationSummary"
+    result: CommunicationSummary
     tags: list[str] = Field(default_factory=list)
     schema_version: str = "v2"
 
 
-class CommunicationSummary(BaseModel):
-    """Two-line communication summary without raw feature disclosure."""
-    summary: list[str] = Field(default_factory=list)
+# ── Internal proctoring review ───────────────────────────────────────────────
 
-    @field_validator("summary")
-    @classmethod
-    def _validate_summary(cls, value: list[str]) -> list[str]:
-        lines = [str(line).strip() for line in value if str(line).strip()]
-        if len(lines) != 2:
-            raise ValueError("summary must contain exactly two non-empty lines")
-        return lines
+class QuestionSuspicionResult(BaseModel):
+    suspicion: bool = False
+    rule_groups: list[str] = Field(default_factory=list)
+
+
+class QuestionReviewResult(BaseModel):
+    q_no: int = Field(..., ge=1)
+    suspicion: bool = False
+    rule_groups: list[str] = Field(default_factory=list)
+
+
+class InternalReviewResult(BaseModel):
+    response_id: str
+    status: str = "success"
+    question_review: list[QuestionReviewResult] = Field(default_factory=list)
+    flagged_questions: list[int] = Field(default_factory=list)
+    schema_version: str = "v1-internal"
 
 
 # ── Request models ────────────────────────────────────────────────────────────

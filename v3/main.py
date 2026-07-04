@@ -1,11 +1,11 @@
 """
-main.py — V2 FastAPI application.
+main.py — V3 FastAPI application.
 
 Endpoints:
   GET  /health                                    → liveness check
-  GET  /v2/analyse/{response_id}/personality      → System B: style / archetype / personality eval
-  GET  /v2/analyse/{response_id}/communication    → System A: skills scoring / communication eval
-  DELETE /v2/analyse/{response_id}/cache          → evict cached raw features for a response_id
+  GET  /v3/analyse/{response_id}/personality      → System B: style / archetype / personality eval
+  GET  /v3/analyse/{response_id}/communication    → System A: skills scoring / communication eval
+  DELETE /v3/analyse/{response_id}/cache          → evict cached raw features for a response_id
 
 Architecture:
   Feature extraction (audio → transcribe → aggregate) is shared and cached in
@@ -14,6 +14,13 @@ Architecture:
   using the rule-based engines — no full result objects are stored in cache.
   This reduces cache size and avoids running both evaluation systems when only
   one is needed.
+
+V3 changes vs V2:
+  - Transcription: AssemblyAI pre-recorded API (disfluencies=True) replaces Whisper.
+  - Real per-word confidence scores — no flat 0.75 proxy, no +0.06 offset.
+  - Filler words: multi-word phrases ('i mean', 'you know') now counted correctly.
+  - Temp dir prefix: v3_pipeline_ (vs v2_pipeline_).
+  - Routes: /v3/ prefix (vs /v2/).
 """
 from __future__ import annotations
 
@@ -23,19 +30,20 @@ import os
 import shutil
 import sys
 import tempfile
+from statistics import median as stats_median
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 # ── path setup ────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent  # Audio Analysis/
 load_dotenv(ROOT / ".env", override=False)
 
-# Ensure v2 package is importable when run from project root
+# Ensure v3 package is importable when run from project root
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -43,10 +51,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("v2.main")
+logger = logging.getLogger("v3.main")
 
-from v2.config import MAX_CONCURRENT_JOBS                              # noqa: E402
-from v2.models import (                                                # noqa: E402
+from v3.config import MAX_CONCURRENT_JOBS                              # noqa: E402
+from v3.models import (                                                # noqa: E402
     AnalyzeRequest,
     CommunicationResult,
     CommunicationSummary,
@@ -54,29 +62,32 @@ from v2.models import (                                                # noqa: E
     PersonalityResult,
     RawFeatures,
 )
-from v2.pipeline.audio_fetcher import fetch_and_prepare_audio          # noqa: E402
-from v2.pipeline.transcriber import transcribe                         # noqa: E402
-from v2.pipeline.text_features import extract_all_text_features        # noqa: E402
-from v2.pipeline.vocal_features import extract_all_vocal_features      # noqa: E402
-from v2.pipeline.normalizer import normalize, aggregate_signals        # noqa: E402
-from v2.pipeline.archetype import classify, dominant, build_style_profile  # noqa: E402
-from v2.pipeline.description import generate_description_from_style_profile  # noqa: E402
-from v2.pipeline.skills_scorer import score as score_skills            # noqa: E402
+from v3.pipeline.communication_summary import generate_communication_summary  # noqa: E402
+from v3.pipeline.audio_fetcher import fetch_and_prepare_audio          # noqa: E402
+from v3.pipeline.transcriber import transcribe                         # noqa: E402
+from v3.pipeline.text_features import extract_all_text_features        # noqa: E402
+from v3.pipeline.vocal_features import extract_all_vocal_features      # noqa: E402
+from v3.pipeline.normalizer import normalize, aggregate_signals        # noqa: E402
+from v3.pipeline.archetype import classify, dominant, build_style_profile  # noqa: E402
+from v3.pipeline.description import generate_description_from_style_profile  # noqa: E402
+from v3.pipeline.skills_scorer import score as score_skills            # noqa: E402
+from v3.pipeline.violation_detector import score_interview              # noqa: E402
 
 # ── in-memory features cache ──────────────────────────────────────────────────
 # Stores only raw features + metadata per response_id.
 # Evaluation (System A / System B) is computed on demand per endpoint.
 _FEATURES_CACHE: dict[str, FeatureCacheEntry] = {}
+_INTERNAL_PROCTORING_TOKEN = os.getenv("INTERNAL_PROCTORING_TOKEN", "")
 
 # ── thread pool for CPU-bound librosa work ────────────────────────────────────
 _EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("THREAD_POOL_WORKERS", "4")))
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Audio Analysis V2",
-    version="2.1.0",
+    title="Audio Analysis V3",
+    version="3.0.0",
     description=(
-        "Communication & Personality Evaluation Pipeline — "
+        "Communication & Personality Evaluation Pipeline (AssemblyAI transcription) — "
         "raw features cached → System A (communication) or System B (personality) on demand"
     ),
 )
@@ -99,10 +110,14 @@ async def _run_in_thread(fn, *args, **kwargs):
 async def _process_single_question(wav_path: str, q_no: int) -> dict:
     """
     Transcribe a single WAV file, then extract its text and vocal features.
+
+    V3: Uses AssemblyAI pre-recorded API with disfluencies=True.
+    mean_confidence is the true mean per-word AssemblyAI confidence — no
+    +0.06 correction offset is applied (that was Whisper-specific).
     """
     logger.info("Starting transcription & feature extraction for Q%d: %s", q_no, wav_path)
 
-    # 1. Transcribe
+    # 1. Transcribe via AssemblyAI
     transcript_result = await transcribe(wav_path)
     text = transcript_result["text"]
     word_timestamps = transcript_result["word_timestamps"]
@@ -134,6 +149,11 @@ async def _process_single_question(wav_path: str, q_no: int) -> dict:
     }
 
 
+def _median(values: list[float]) -> float:
+    """Simple median helper retained for legacy use inside this module."""
+    return float(stats_median(values)) if values else 0.0
+
+
 # ── core feature extraction pipeline ─────────────────────────────────────────
 
 async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
@@ -149,7 +169,7 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
 
     Returns the cached FeatureCacheEntry.
     """
-    temp_dir = tempfile.mkdtemp(prefix="v2_pipeline_")
+    temp_dir = tempfile.mkdtemp(prefix="v3_pipeline_")
     try:
         # ── Step 1: Audio ──────────────────────────────────────────────────
         wav_paths = await fetch_and_prepare_audio(response_id, temp_dir)
@@ -178,7 +198,7 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
         sum_total_words = sum(q["text_feats"]["total_words"] for q in question_results)
 
         # Discourse features computed on the combined transcript for global accuracy
-        from v2.pipeline.text_features import compute_discourse_features
+        from v3.pipeline.text_features import compute_discourse_features
         discourse = compute_discourse_features(transcript)
         sum_connectors = float(discourse["discourse_connectors"])
         sum_tier1 = float(discourse["discourse_tier1"])
@@ -234,7 +254,8 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
             avg_feats["fluency_pause_freq"] += v_f.get("fluency_pause_freq", 0.0)
             avg_feats["voiced_fraction"]   += v_f.get("voiced_fraction", 0.0)
 
-            avg_feats["intel_confidence"]  += q.get("mean_confidence", 0.75)
+            # V3: use AssemblyAI's real per-word confidence directly (no offset)
+            avg_feats["intel_confidence"]  += q.get("mean_confidence", 0.80)
 
         for k in avg_feats:
             avg_feats[k] = round(avg_feats[k] / num_q, 4)
@@ -275,7 +296,7 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
             fluency_pause_freq=avg_feats["fluency_pause_freq"],
             voiced_fraction=avg_feats["voiced_fraction"],
 
-            # Averaged ASR confidence
+            # V3: real AssemblyAI per-word confidence (no +0.06 offset)
             intel_confidence=avg_feats["intel_confidence"],
             is_short_duration=is_short_duration,
         )
@@ -285,6 +306,7 @@ async def _extract_and_cache_features(response_id: str) -> FeatureCacheEntry:
             raw_features=raw,
             transcript=transcript,
             duration_ms=duration_ms,
+            question_results=question_results,
         )
 
     except Exception as exc:
@@ -316,40 +338,8 @@ def _dedupe(items: list[str]) -> list[str]:
     return out
 
 
-def _build_result(entry: FeatureCacheEntry, skills) -> tuple[CommunicationSummary, list[str]]:
-    """Build the compact qualitative analysis payload from cached features."""
-    raw = entry.raw_features
+def _build_tags(raw: RawFeatures, skills) -> list[str]:
     tags: list[str] = []
-
-    if skills.composite_score >= 80:
-        line1 = (
-            "The candidate communicates with strong control, clear pacing, and a vocabulary range that keeps ideas easy to follow."
-        )
-    elif skills.composite_score >= 65:
-        line1 = (
-            "The candidate communicates with generally steady control, showing clear intent, a workable pace, and enough vocabulary range to explain ideas without sounding forced."
-        )
-    elif skills.composite_score >= 50:
-        line1 = (
-            "The candidate communicates adequately, but pacing and structure are uneven enough that the message loses polish in places."
-        )
-    else:
-        line1 = (
-            "The candidate’s delivery is harder to follow in parts, with pace, clarity, or structure limiting how effectively ideas land."
-        )
-
-    if skills.lexical_structural.score >= 4.0 and skills.fluency.score >= 3.5:
-        line2 = (
-            "The response is strongest when it stays concrete and organized; it only softens when answers run long and the phrasing becomes less precise."
-        )
-    elif skills.lexical_structural.score >= 3.0:
-        line2 = (
-            "The response is strongest when it stays concrete and organized; longer answers make the flow loosen slightly and the sentence shaping feel less deliberate."
-        )
-    else:
-        line2 = (
-            "The response needs tighter sentence structure; when the answer extends, the flow loosens and the message relies more on repetition than progression."
-        )
 
     if skills.fluency.score >= 3.5:
         tags.append("steady-delivery")
@@ -368,18 +358,18 @@ def _build_result(entry: FeatureCacheEntry, skills) -> tuple[CommunicationSummar
     if raw.total_words >= 180:
         tags.append("long-answer-drift")
 
-    return CommunicationSummary(summary=[line1, line2]), _dedupe(tags)
+    return _dedupe(tags)
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.2.0"}
+    return {"status": "up & running", "version": "3.1.2", "transcriber": "assemblyai"}
 
 
 @app.get(
-    "/v2/analyse/{response_id}/personality",
+    "/v3/analyse/{response_id}/personality",
     response_model=PersonalityResult,
     summary="System B — Personality / Communication Style Evaluation",
     description=(
@@ -441,7 +431,7 @@ async def analyse_personality(
 
 
 @app.get(
-    "/v2/analyse/{response_id}/communication",
+    "/v3/analyse/{response_id}/communication",
     response_model=CommunicationResult,
     summary="System A — Communication Skills Evaluation",
     description=(
@@ -481,7 +471,8 @@ async def analyse_communication(
 
     # System A — 5-axis skills scoring
     skills = score_skills(raw, role_profile=role_profile)
-    result, tags = _build_result(entry, skills)
+    result = await generate_communication_summary(raw, skills)
+    tags = _build_tags(raw, skills)
 
     logger.info(
         "[%s] Communication eval complete — composite: %.1f/100 (%s), review=%s",
@@ -498,7 +489,7 @@ async def analyse_communication(
 
 
 @app.delete(
-    "/v2/analyse/{response_id}/cache",
+    "/v3/analyse/{response_id}/cache",
     summary="Evict cached features for a response",
     description="Removes the cached raw features so the next request re-runs extraction.",
 )
@@ -509,20 +500,76 @@ async def evict_features_cache(response_id: str):
     return {"response_id": response_id, "evicted": evicted}
 
 
+@app.get("/v3/analyse/{response_id}/raw")
+async def get_raw_features(response_id: str):
+    entry = await _get_or_extract_features(response_id)
+    return entry.raw_features
+
+
+@app.get(
+    "/v3/internal/analyse/{response_id}/proctoring",
+    summary="Internal proctor review",
+    description=(
+        "Question-level academic violation evidence for internal proctoring only. "
+        "Output is an evidence payload per question, not a verdict. "
+        "Non-evaluable questions (skipped, silent, low-confidence) are excluded from "
+        "scoring and from the baseline/flatness series."
+    ),
+)
+async def analyse_proctoring(
+    response_id: str,
+    internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    if not _INTERNAL_PROCTORING_TOKEN:
+        raise HTTPException(status_code=503, detail="Internal proctoring is not configured.")
+    if internal_token != _INTERNAL_PROCTORING_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        entry = await _get_or_extract_features(response_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # score_interview handles sorting, eligibility gate, and off-by-one safety
+    # internally — it will never produce a result for a q_no beyond what exists
+    # in entry.question_results.
+    evidence_payloads = await _run_in_thread(score_interview, entry.question_results)
+
+    flagged_questions = [
+        p["q_no"]
+        for p in evidence_payloads
+        if p.get("flagged_for_review") is True
+    ]
+
+    logger.info(
+        "[%s] Proctoring complete — %d questions scored, %d flagged",
+        response_id,
+        sum(1 for p in evidence_payloads if p.get("evaluable")),
+        len(flagged_questions),
+    )
+
+    return {
+        "response_id": response_id,
+        "flagged_questions": flagged_questions,
+        "question_evidence": evidence_payloads,
+        "schema_version": "v3",
+    }
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Run the V2 audio analysis service.")
+    parser = argparse.ArgumentParser(description="Run the V3 audio analysis service.")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8002)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
     uvicorn.run(
-        "v2.main:app",
+        "v3.main:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
