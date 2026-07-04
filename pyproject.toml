@@ -1,0 +1,25 @@
+[project]
+name = "audio-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "assemblyai>=0.64.21",
+    "fastapi>=0.111.0",
+    "faster-whisper>=1.2.1",
+    "graphifyy>=0.8.20",
+    "httpx>=0.27.0",
+    "ipykernel>=7.2.0",
+    "librosa>=0.10.0",
+    "numpy>=1.26.0",
+    "openai>=1.30.0",
+    "pandas>=3.0.3",
+    "plotly>=6.7.0",
+    "pydantic>=2.7.0",
+    "pymongo>=4.17.0",
+    "python-dotenv>=1.0.0",
+    "seaborn>=0.13.2",
+    "uvicorn[standard]>=0.29.0",
+    "webrtcvad-wheels>=2.0.14",
+]

@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Speaking Assessment - Interview Processor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=Inter:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-color: #58a6ff;
+            --accent-glow: rgba(88, 166, 255, 0.3);
+            --success-color: #238636;
+            --error-color: #da3633;
+            --border-color: #30363d;
+            --thinking-bg: #0d1117;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            padding: 2.5rem;
+            background: var(--card-bg);
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+            margin-top: 2rem;
+        }
+
+        h1 {
+            font-family: 'Outfit', sans-serif;
+            margin-top: 0;
+            font-weight: 600;
+            font-size: 2.2rem;
+            background: linear-gradient(135deg, #fff 0%, #8b949e 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .input-group {
+            margin-bottom: 2rem;
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-wrapper {
+            flex-grow: 1;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        input {
+            width: 100%;
+            padding: 14px 18px;
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-size: 1rem;
+            box-sizing: border-box;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        input:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        button {
+            padding: 14px 28px;
+            background: var(--accent-color);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px var(--accent-glow);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background-color: var(--border-color);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* AI Thinking UI */
+        #thinking-area {
+            margin-top: 2rem;
+            display: none;
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .thinking-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 1rem;
+            color: var(--accent-color);
+            font-weight: 600;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background: var(--accent-color);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent-color);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                opacity: 0.5;
+            }
+
+            50% {
+                transform: scale(1.2);
+                opacity: 1;
+            }
+
+            100% {
+                transform: scale(0.95);
+                opacity: 0.5;
+            }
+        }
+
+        #thinking-log {
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            max-height: 200px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 10px;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        .log-entry.active {
+            color: var(--text-primary);
+        }
+
+        .log-time {
+            color: #444;
+            min-width: 60px;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        /* Result Area */
+        #result-area {
+            margin-top: 2rem;
+            display: none;
+        }
+
+        .result-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2rem;
+        }
+
+        .overall-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .overall-info h2 {
+            margin: 0;
+            font-size: 2.5rem;
+            font-family: 'Outfit', sans-serif;
+            color: var(--accent-color);
+        }
+
+        .overall-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            background: var(--accent-glow);
+            color: var(--accent-color);
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        .grade-circle {
+            width: 80px;
+            height: 80px;
+            border: 4px solid var(--accent-color);
+            border-radius: 50%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 2rem;
+            font-weight: 700;
+            font-family: 'Outfit', sans-serif;
+            box-shadow: 0 0 20px var(--accent-glow);
+        }
+
+        /* Integrity / Cheat Detection Styling */
+        .integrity-section {
+            background: rgba(218, 54, 51, 0.05);
+            border: 1px solid rgba(218, 54, 51, 0.2);
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .integrity-info .title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .integrity-info .value {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #ff7b72;
+        }
+
+        .integrity-status {
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        .status-none { background: rgba(35, 134, 54, 0.2); color: #3fb950; }
+        .status-low { background: rgba(210, 153, 34, 0.2); color: #d29922; }
+        .status-medium { background: rgba(219, 109, 40, 0.2); color: #db6d28; }
+        .status-high { background: rgba(218, 54, 51, 0.2); color: #f85149; }
+
+        .dimension-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .dimension-row {
+            display: grid;
+            grid-template-columns: 180px 1fr 100px;
+            align-items: start;
+            gap: 20px;
+            transition: all 0.5s ease;
+        }
+
+        .dim-info .dim-name {
+            font-weight: 600;
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .dim-info .dim-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .dim-reasoning {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            padding-left: 15px;
+            border-left: 2px solid var(--border-color);
+        }
+
+        .dim-score {
+            text-align: right;
+            font-weight: 600;
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.1rem;
+            color: var(--accent-color);
+        }
+
+        .max-marks {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        .summary-box {
+            margin-top: 3rem;
+            padding: 1.5rem;
+            background: var(--bg-color);
+            border-radius: 12px;
+            border-left: 4px solid var(--accent-color);
+        }
+
+        .summary-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        .summary-text {
+            font-size: 1rem;
+            line-height: 1.6;
+            font-style: italic;
+            color: var(--text-primary);
+        }
+
+        .error-message {
+            color: var(--error-color);
+            margin-top: 1rem;
+            padding: 1rem;
+            background: rgba(218, 54, 51, 0.1);
+            border-radius: 8px;
+            display: none;
+            text-align: center;
+        }
+
+        .results-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 2rem;
+            align-items: start;
+        }
+
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 350px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            padding: 15px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-sizing: border-box;
+        }
+
+        .results-details {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .results-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 600px) {
+            .dimension-row {
+                grid-template-columns: 1fr 80px;
+            }
+
+            .dim-reasoning {
+                grid-column: 1 / span 2;
+                margin-top: 10px;
+                padding-left: 0;
+                border-left: none;
+                border-top: 1px solid var(--border-color);
+                padding-top: 10px;
+            }
+
+            .input-group {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>AI Speaking Assessment</h1>
+
+        <div class="input-group">
+            <div class="input-wrapper">
+                <label for="interview-id">Interview ID</label>
+                <input type="text" id="interview-id" placeholder="Enter Response ID (e.g. 69a03c...)" value="">
+            </div>
+            <div style="display: flex; align-items: flex-end;">
+                <button id="process-btn">Analyze Voice</button>
+            </div>
+        </div>
+
+        <div id="error-area" class="error-message"></div>
+
+        <div id="thinking-area">
+            <div class="thinking-header">
+                <div class="pulse"></div>
+                AI Engine Thinking
+            </div>
+            <div id="thinking-log">
+                <!-- Log entries added here -->
+            </div>
+        </div>
+
+        <div id="result-area">
+            <div class="result-card">
+                
+                <div class="template-selector-container" style="margin-bottom: 1.5rem; display: flex; align-items: center; gap: 12px; background: rgba(255,255,255,0.02); padding: 12px 18px; border-radius: 8px; border: 1px solid var(--border-color);">
+                    <label for="job-template-select" style="margin: 0; font-size: 0.85rem; text-transform: uppercase; font-weight: 600;">Job baseline:</label>
+                    <select id="job-template-select" style="background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 12px; border-radius: 6px; outline: none; cursor: pointer; font-size: 0.9rem;">
+                        <option value="none">None (Candidate Only)</option>
+                        <option value="software_engineer">Software Engineer</option>
+                        <option value="customer_support">Customer Support</option>
+                        <option value="sales_representative">Sales Representative</option>
+                    </select>
+                    <div id="match-pct-container" style="display: none; align-items: center; gap: 8px; margin-left: auto;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase;">Role compatibility:</span>
+                        <span id="role-match-pct" style="font-weight: 700; font-size: 1.2rem; color: var(--accent-color);">0%</span>
+                    </div>
+                </div>
+
+                <div class="results-grid">
+                    <div class="chart-container">
+                        <canvas id="radarChart"></canvas>
+                    </div>
+                    
+                    <div class="results-details">
+                        <div class="overall-section" style="margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 1.5rem;">
+                            <div class="overall-info">
+                                <div class="dim-label" style="padding:0">Final Assessment Score</div>
+                                <h2 id="overall-score" style="margin-top: 5px;">0.0<span class="max-marks">/100</span></h2>
+                                <div id="overall-label" class="overall-badge">---</div>
+                            </div>
+                            <div class="grade-circle" id="overall-grade">-</div>
+                        </div>
+
+                        <!-- Academic Integrity Section -->
+                        <div class="integrity-section" id="integrity-section" style="margin-bottom: 0;">
+                            <div style="flex: 1;">
+                                <div class="integrity-info">
+                                    <div class="title">Academic Integrity Check (Scriptedness)</div>
+                                    <div class="value" id="cheat-prob">0% Cheat Prob</div>
+                                </div>
+                                <div id="integrity-signals" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 8px;">
+                                    <!-- Signal tags added here -->
+                                </div>
+                            </div>
+                            <div class="integrity-status status-none" id="integrity-status">POOR RISK</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dimension-list" id="dimension-list" style="margin-top: 2rem; border-top: 1px solid var(--border-color); padding-top: 2rem;">
+                    <!-- Dimensions injected here -->
+                </div>
+
+                <div class="summary-box">
+                    <div class="summary-title">Executive Thinking Summary</div>
+                    <div class="summary-text" id="summary-text">---</div>
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button id="reset-btn" style="margin-top: 2rem; flex: 1; background: var(--border-color);">Analyze Another Interview</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000/voice-assessment/api/v1";
+        const input = document.getElementById('interview-id');
+        const btn = document.getElementById('process-btn');
+        const thinkingArea = document.getElementById('thinking-area');
+        const thinkingLog = document.getElementById('thinking-log');
+        const resultArea = document.getElementById('result-area');
+        const errorArea = document.getElementById('error-area');
+        const dimList = document.getElementById('dimension-list');
+
+        const overallScoreEl = document.getElementById('overall-score');
+        const overallLabelEl = document.getElementById('overall-label');
+        const overallGradeEl = document.getElementById('overall-grade');
+        const summaryTextEl = document.getElementById('summary-text');
+        
+        const cheatProbEl = document.getElementById('cheat-prob');
+        const integrityStatusEl = document.getElementById('integrity-status');
+        
+        const resetBtn = document.getElementById('reset-btn');
+
+        const BAND_COLORS = {
+            'Excellent': { bg: 'rgba(63, 185, 80, 0.15)', text: '#3fb950' },
+            'Good': { bg: 'rgba(46, 160, 67, 0.15)', text: '#56d364' },
+            'Average': { bg: 'rgba(210, 153, 34, 0.15)', text: '#d29922' },
+            'Below Average': { bg: 'rgba(219, 109, 40, 0.15)', text: '#db6d28' },
+            'Poor': { bg: 'rgba(248, 81, 73, 0.15)', text: '#f85149' }
+        };
+
+        btn.addEventListener('click', async () => {
+            const id = input.value.trim();
+            if (!id) {
+                showError("Please enter a valid interview ID");
+                return;
+            }
+
+            // UI Reset
+            btn.disabled = true;
+            thinkingArea.style.display = 'block';
+            thinkingLog.innerHTML = '';
+            resultArea.style.display = 'none';
+            errorArea.style.display = 'none';
+            dimList.innerHTML = '';
+
+            addLog("Initializing secure connection...", true);
+
+            try {
+                const response = await fetch(`${API_BASE}/evaluate_by_id?response_id=${id}`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    throw new Error("Failed to connect to the analysis engine.");
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const data = JSON.parse(line);
+                            processStreamStep(data);
+                        } catch (e) {
+                            console.error("Chunk parse error", e);
+                        }
+                    }
+                }
+            } catch (err) {
+                showError(err.message);
+                thinkingArea.style.display = 'none';
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        let radarChart = null;
+
+        const JOB_TEMPLATES = {
+            'software_engineer': {
+                name: 'Software Engineer',
+                color: 'rgba(88, 166, 255, 0.2)',
+                borderColor: '#58a6ff',
+                baseline: {
+                    logical_cohesion: 4.5,
+                    delivery_fluency: 3.0,
+                    pronunciation_clarity: 3.5,
+                    vocal_dynamism: 2.5,
+                    collaborative_tone: 4.0,
+                    lexical_precision: 4.2
+                }
+            },
+            'customer_support': {
+                name: 'Customer Support',
+                color: 'rgba(56, 211, 100, 0.2)',
+                borderColor: '#3fb950',
+                baseline: {
+                    logical_cohesion: 3.5,
+                    delivery_fluency: 4.5,
+                    pronunciation_clarity: 4.5,
+                    vocal_dynamism: 3.5,
+                    collaborative_tone: 4.8,
+                    lexical_precision: 3.2
+                }
+            },
+            'sales_representative': {
+                name: 'Sales Representative',
+                color: 'rgba(240, 136, 62, 0.2)',
+                borderColor: '#f0883e',
+                baseline: {
+                    logical_cohesion: 4.0,
+                    delivery_fluency: 4.8,
+                    pronunciation_clarity: 4.5,
+                    vocal_dynamism: 4.8,
+                    collaborative_tone: 4.5,
+                    lexical_precision: 4.0
+                }
+            }
+        };
+
+        function calculateMatchPercentage(candidateScores, baseline) {
+            let totalDiff = 0;
+            const keys = ['logical_cohesion', 'delivery_fluency', 'pronunciation_clarity', 'vocal_dynamism', 'collaborative_tone', 'lexical_precision'];
+            keys.forEach(k => {
+                totalDiff += Math.abs((candidateScores[k] || 0) - baseline[k]);
+            });
+            const averageError = totalDiff / keys.length;
+            const match = Math.max(0, Math.min(100, 100 - (averageError * 20)));
+            return Math.round(match);
+        }
+
+        function renderRadarChart(candidateData, baselineData = null) {
+            const ctx = document.getElementById('radarChart').getContext('2d');
+            
+            const labels = [
+                'Logical Cohesion',
+                'Delivery Fluency',
+                'Pronunciation Clarity',
+                'Vocal Dynamism',
+                'Collaborative Tone',
+                'Lexical Precision'
+            ];
+
+            const datasets = [
+                {
+                    label: 'Candidate Profile',
+                    data: [
+                        candidateData.logical_cohesion || 0.0,
+                        candidateData.delivery_fluency || 0.0,
+                        candidateData.pronunciation_clarity || 0.0,
+                        candidateData.vocal_dynamism || 0.0,
+                        candidateData.collaborative_tone || 0.0,
+                        candidateData.lexical_precision || 0.0
+                    ],
+                    backgroundColor: 'rgba(139, 148, 158, 0.2)',
+                    borderColor: '#8b949e',
+                    pointBackgroundColor: '#8b949e',
+                    pointBorderColor: '#fff',
+                    pointHoverBackgroundColor: '#fff',
+                    pointHoverBorderColor: '#8b949e',
+                    borderWidth: 2,
+                    fill: true
+                }
+            ];
+
+            if (baselineData) {
+                const template = JOB_TEMPLATES[baselineData];
+                datasets.unshift({
+                    label: template.name + ' Baseline',
+                    data: [
+                        template.baseline.logical_cohesion,
+                        template.baseline.delivery_fluency,
+                        template.baseline.pronunciation_clarity,
+                        template.baseline.vocal_dynamism,
+                        template.baseline.collaborative_tone,
+                        template.baseline.lexical_precision
+                    ],
+                    backgroundColor: template.color,
+                    borderColor: template.borderColor,
+                    pointBackgroundColor: template.borderColor,
+                    pointBorderColor: '#fff',
+                    pointHoverBackgroundColor: '#fff',
+                    pointHoverBorderColor: template.borderColor,
+                    borderWidth: 2,
+                    fill: true
+                });
+                
+                // Highlight candidate with accent color when comparing
+                datasets[1].backgroundColor = 'rgba(88, 166, 255, 0.25)';
+                datasets[1].borderColor = '#58a6ff';
+                datasets[1].pointBackgroundColor = '#58a6ff';
+                datasets[1].pointBorderColor = '#fff';
+            } else {
+                // Default candidate alone highlight
+                datasets[0].backgroundColor = 'rgba(88, 166, 255, 0.2)';
+                datasets[0].borderColor = '#58a6ff';
+                datasets[0].pointBackgroundColor = '#58a6ff';
+            }
+
+            if (radarChart) {
+                radarChart.destroy();
+            }
+
+            radarChart = new Chart(ctx, {
+                type: 'radar',
+                data: {
+                    labels: labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        r: {
+                            angleLines: {
+                                color: '#30363d'
+                            },
+                            grid: {
+                                color: '#30363d'
+                            },
+                            pointLabels: {
+                                color: '#8b949e',
+                                font: {
+                                    size: 11,
+                                    family: 'Inter'
+                                }
+                            },
+                            ticks: {
+                                color: '#8b949e',
+                                backdropColor: 'transparent',
+                                font: {
+                                    size: 10
+                                },
+                                stepSize: 1,
+                                min: 0,
+                                max: 5
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#e6edf3',
+                                font: {
+                                    family: 'Inter',
+                                    size: 11
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        resetBtn.addEventListener('click', () => {
+            resultArea.style.display = 'none';
+            thinkingArea.style.display = 'none';
+            document.getElementById('integrity-signals').innerHTML = '';
+            integrityStatusEl.className = 'integrity-status status-none';
+            if (radarChart) {
+                radarChart.destroy();
+                radarChart = null;
+            }
+            input.value = '';
+            input.focus();
+        });
+
+        function processStreamStep(data) {
+            if (data.type === 'status') {
+                addLog(data.message, true);
+            } else if (data.type === 'result') {
+                addLog("Assessment complete. Finalizing report...", true);
+                setTimeout(() => {
+                    thinkingArea.style.display = 'none';
+                    showResults(data.payload);
+                }, 800);
+            } else if (data.type === 'error') {
+                showError(data.message);
+                thinkingArea.style.display = 'none';
+            }
+        }
+
+        function addLog(msg, active = false) {
+            const last = thinkingLog.querySelector('.log-entry.active');
+            if (last) last.classList.remove('active');
+
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${active ? 'active' : ''}`;
+            const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-msg">${msg}</span>`;
+            thinkingLog.appendChild(entry);
+            thinkingLog.scrollTop = thinkingLog.scrollHeight;
+        }
+
+        async function showResults(report) {
+            overallScoreEl.innerHTML = `${report.overall_score.toFixed(1)}<span class="max-marks">/100</span>`;
+            overallLabelEl.innerText = report.label;
+            overallGradeEl.innerText = report.grade;
+            summaryTextEl.innerText = report.executive_summary;
+
+            // Apply band color to overall label
+            const bandStyle = BAND_COLORS[report.label] || BAND_COLORS['Average'];
+            overallLabelEl.style.backgroundColor = bandStyle.bg;
+            overallLabelEl.style.color = bandStyle.text;
+
+            // Cheat Probability / Scriptedness
+            const scripted = report.features.fluency.scripted_detection;
+            const prob = scripted.ai_scripted_speech_score;
+            cheatProbEl.innerText = `${prob}% Scripted Prob`;
+            integrityStatusEl.innerText = scripted.severity.toUpperCase() + " RISK";
+            integrityStatusEl.className = `integrity-status status-${scripted.severity}`;
+
+            const signalsEl = document.getElementById('integrity-signals');
+            signalsEl.innerHTML = '';
+            if (scripted.flagged_signals && scripted.flagged_signals.length > 0) {
+                scripted.flagged_signals.forEach(sig => {
+                    const span = document.createElement('span');
+                    span.style.cssText = 'background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 3px; margin-right: 6px; border: 1px solid var(--border-color);';
+                    span.innerText = sig.replace(/_/g, ' ').toUpperCase();
+                    signalsEl.appendChild(span);
+                });
+            } else {
+                signalsEl.innerText = 'No suspicious speech patterns detected.';
+            }
+
+            // Radar Chart Rendering & Dropdown Baselines
+            window.currentCandidateScores = {
+                logical_cohesion: report.scores.logical_cohesion,
+                delivery_fluency: report.scores.delivery_fluency,
+                pronunciation_clarity: report.scores.pronunciation_clarity,
+                vocal_dynamism: report.scores.vocal_dynamism,
+                collaborative_tone: report.scores.collaborative_tone,
+                lexical_precision: report.scores.lexical_precision
+            };
+
+            const templateSelect = document.getElementById('job-template-select');
+            const matchContainer = document.getElementById('match-pct-container');
+            const roleMatchPct = document.getElementById('role-match-pct');
+
+            templateSelect.value = 'none';
+            matchContainer.style.display = 'none';
+
+            renderRadarChart(window.currentCandidateScores);
+
+            templateSelect.onchange = function() {
+                const selectedVal = templateSelect.value;
+                if (selectedVal === 'none') {
+                    matchContainer.style.display = 'none';
+                    renderRadarChart(window.currentCandidateScores);
+                } else {
+                    const template = JOB_TEMPLATES[selectedVal];
+                    const match = calculateMatchPercentage(window.currentCandidateScores, template.baseline);
+                    roleMatchPct.innerText = `${match}%`;
+                    matchContainer.style.display = 'flex';
+                    renderRadarChart(window.currentCandidateScores, selectedVal);
+                }
+            };
+
+            const dimensions = [
+                { key: 'logical_cohesion', name: 'Logical Cohesion' },
+                { key: 'delivery_fluency', name: 'Delivery Fluency' },
+                { key: 'pronunciation_clarity', name: 'Pronunciation Clarity' },
+                { key: 'vocal_dynamism', name: 'Vocal Dynamism' },
+                { key: 'collaborative_tone', name: 'Collaborative Tone' },
+                { key: 'lexical_precision', name: 'Lexical Precision' }
+            ];
+
+            resultArea.style.display = 'block';
+            window.scrollTo({ top: resultArea.offsetTop - 50, behavior: 'smooth' });
+
+            dimList.innerHTML = '';
+            for (const dim of dimensions) {
+                const data = report.dimensions[dim.key];
+                if (!data) continue;
+
+                const row = document.createElement('div');
+                row.className = 'dimension-row';
+                row.style.opacity = '0';
+                row.style.transform = 'translateY(10px)';
+                
+                const dStyle = BAND_COLORS[data.label] || BAND_COLORS['Average'];
+                
+                row.innerHTML = `
+                    <div class="dim-info">
+                        <div class="dim-name">${dim.name}</div>
+                        <div class="dim-label" style="background-color: ${dStyle.bg}; color: ${dStyle.text}">${data.label}</div>
+                    </div>
+                    <div class="dim-reasoning">${data.reasoning}</div>
+                    <div class="dim-score">
+                        ${data.score.toFixed(1)}<div class="max-marks">/5.0</div>
+                    </div>
+                `;
+                dimList.appendChild(row);
+                
+                await new Promise(r => setTimeout(r, 200));
+                row.style.opacity = '1';
+                row.style.transform = 'translateY(0)';
+            }
+        }
+
+        function showError(msg) {
+            errorArea.innerText = `Error: ${msg}`;
+            errorArea.style.display = 'block';
+            setTimeout(() => { errorArea.style.display = 'none'; }, 8000);
+        }
+    </script>
+</body>
+</html>

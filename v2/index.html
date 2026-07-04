@@ -1,0 +1,1310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audio Analysis V2 — Full Debug Tester</title>
+  <meta name="description" content="Internal debug view for Zeko V2 communication analysis pipeline. Shows all System A and System B outputs in a single screen." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Design Tokens ───────────────────────────────────────────────── */
+    :root {
+      --bg:           #080b14;
+      --bg2:          #0e1525;
+      --bg3:          #131d35;
+      --bg4:          #192038;
+      --border:       #1a2744;
+      --border-hi:    #2563eb55;
+      --accent:       #3b82f6;
+      --accent2:      #6366f1;
+      --accent-glow:  #3b82f618;
+      --text:         #e2e8f0;
+      --text-muted:   #64748b;
+      --text-dim:     #94a3b8;
+      --success:      #10b981;
+      --warn:         #f59e0b;
+      --danger:       #ef4444;
+      --purple:       #a78bfa;
+
+      /* System A axis colours */
+      --fluency:      #38bdf8;
+      --intel:        #818cf8;
+      --lexical:      #34d399;
+      --narrative:    #fb923c;
+      --vocal:        #e879f9;
+
+      /* Archetype colours */
+      --arch-1: #6366f1;
+      --arch-2: #10b981;
+      --arch-3: #f59e0b;
+      --arch-4: #3b82f6;
+      --arch-5: #ef4444;
+
+      --radius:    12px;
+      --radius-sm: 8px;
+      --shadow:    0 4px 32px #00000055;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ──────────────────────────────────────────────────────── */
+    header {
+      background: linear-gradient(135deg, var(--bg2) 0%, #0a0f1e 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      width: 38px; height: 38px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px;
+      display: grid; place-items: center;
+      font-size: 18px;
+      flex-shrink: 0;
+      box-shadow: 0 0 18px var(--accent-glow);
+    }
+
+    header h1 { font-size: 16px; font-weight: 600; }
+    header .subtitle { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+
+    .badge-debug {
+      margin-left: auto;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      padding: 3px 10px;
+      border-radius: 20px;
+      background: #45160044;
+      border: 1px solid var(--warn);
+      color: var(--warn);
+    }
+
+    /* ── Layout ──────────────────────────────────────────────────────── */
+    main {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      flex: 1;
+      height: calc(100vh - 61px);
+    }
+
+    /* ── Control Panel ───────────────────────────────────────────────── */
+    .ctrl {
+      background: var(--bg2);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .section-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 5px; }
+
+    label { font-size: 12px; font-weight: 500; color: var(--text-dim); }
+
+    input[type="text"], select {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      padding: 9px 12px;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      appearance: none;
+    }
+
+    select { cursor: pointer; }
+
+    input[type="text"]:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    input::placeholder { color: var(--text-muted); }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+    }
+
+    .toggle-lbl { font-size: 12px; color: var(--text-dim); }
+
+    .toggle { position: relative; width: 36px; height: 20px; cursor: pointer; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+
+    .tslider {
+      position: absolute; inset: 0;
+      background: var(--border);
+      border-radius: 20px;
+      transition: background 0.2s;
+    }
+    .tslider::before {
+      content: '';
+      position: absolute;
+      left: 2px; top: 2px;
+      width: 16px; height: 16px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .tslider { background: var(--accent); }
+    .toggle input:checked + .tslider::before { transform: translateX(16px); }
+
+    .btn {
+      width: 100%; padding: 11px;
+      border-radius: var(--radius-sm);
+      font-size: 13px; font-weight: 600;
+      cursor: pointer; border: none;
+      transition: all 0.2s;
+      display: flex; align-items: center;
+      justify-content: center; gap: 8px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: white;
+      box-shadow: 0 4px 16px #3b82f630;
+    }
+    .btn-primary:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px #3b82f650;
+    }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .btn-ghost {
+      background: var(--bg3);
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { background: var(--border); color: var(--text); }
+
+    /* Status */
+    .status-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 9px 12px; border-radius: var(--radius-sm);
+      font-size: 12px; font-weight: 500;
+      opacity: 0; transition: opacity 0.3s;
+    }
+    .status-bar.show { opacity: 1; }
+    .status-bar.running { background: #1e3a5f; border: 1px solid #3b82f660; color: var(--accent); }
+    .status-bar.success { background: #064e3b; border: 1px solid var(--success); color: var(--success); }
+    .status-bar.error   { background: #450a0a; border: 1px solid var(--danger); color: var(--danger); }
+
+    .spinner {
+      width: 12px; height: 12px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .log-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--text-muted);
+      max-height: 110px;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+    .log-entry { display: flex; gap: 6px; }
+    .log-entry .t  { color: var(--accent); flex-shrink: 0; }
+    .log-entry .ok { color: var(--success); }
+    .log-entry .er { color: var(--danger); }
+
+    /* ── Results panel ───────────────────────────────────────────────── */
+    .results {
+      overflow-y: auto;
+      padding: 24px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .placeholder {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px; color: var(--text-muted); text-align: center;
+      animation: fadein 0.5s ease;
+    }
+    .placeholder-icon { font-size: 56px; opacity: 0.25; filter: grayscale(1); }
+    .placeholder h2 { font-size: 18px; font-weight: 600; color: var(--text-dim); }
+    .placeholder p  { font-size: 13px; max-width: 320px; line-height: 1.7; }
+
+    @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+
+    /* ── Tabs ────────────────────────────────────────────────────────── */
+    .tab-row {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0;
+    }
+
+    .tab-btn {
+      padding: 8px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.2s, border-color 0.2s;
+      letter-spacing: 0.02em;
+    }
+
+    .tab-btn:hover { color: var(--text-dim); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .tab-panel { display: none; flex-direction: column; gap: 20px; animation: fadein 0.3s ease; }
+    .tab-panel.active { display: flex; }
+
+    /* ── Card ────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 22px;
+      animation: fadein 0.4s ease;
+    }
+
+    .card-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .card-title .pill {
+      font-size: 9px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+    }
+
+    /* ── System A — Axis bars ─────────────────────────────────────────── */
+    .composite-hero {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .composite-score {
+      font-size: 52px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1;
+    }
+
+    .composite-label {
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    .composite-band {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+      letter-spacing: 0.06em;
+    }
+
+    .band-excellent { background: #064e3b44; color: #34d399; border: 1px solid #34d39955; }
+    .band-good      { background: #1e3a5f44; color: #60a5fa; border: 1px solid #60a5fa55; }
+    .band-average   { background: #44340044; color: #fbbf24; border: 1px solid #fbbf2455; }
+    .band-below-average { background: #44200044; color: #f97316; border: 1px solid #f9731655; }
+    .band-poor      { background: #45100044; color: #f87171; border: 1px solid #f8717155; }
+
+    .axis-list { display: flex; flex-direction: column; gap: 14px; }
+
+    .axis-row { display: flex; flex-direction: column; gap: 6px; }
+
+    .axis-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .axis-left { display: flex; align-items: center; gap: 8px; }
+
+    .axis-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .axis-name { font-size: 13px; font-weight: 500; color: var(--text-dim); }
+
+    .axis-right { display: flex; align-items: center; gap: 8px; }
+
+    .axis-score {
+      font-size: 18px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .axis-band-tag {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 20px;
+      letter-spacing: 0.05em;
+    }
+
+    .axis-track {
+      height: 5px;
+      background: var(--bg3);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .axis-fill {
+      height: 100%;
+      border-radius: 10px;
+      transition: width 0.9s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .axis-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 3px;
+    }
+
+    .flag-chip {
+      font-size: 9px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 10px;
+      background: #45160033;
+      border: 1px solid #f59e0b44;
+      color: var(--warn);
+      letter-spacing: 0.04em;
+    }
+
+    .conf-chip {
+      font-size: 9px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── System B — Archetype blend ──────────────────────────────────── */
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .arch-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 14px 6px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--bg3);
+      transition: all 0.3s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .arch-cell.dom {
+      border-color: var(--cell-c, var(--accent));
+      box-shadow: 0 0 22px color-mix(in srgb, var(--cell-c, var(--accent)) 20%, transparent);
+    }
+
+    .arch-cell::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 2px;
+      background: var(--cell-c, var(--border));
+    }
+
+    .arch-emoji { font-size: 20px; }
+    .arch-name  { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-muted); }
+    .arch-pct   { font-size: 20px; font-weight: 700; color: var(--cell-c, var(--text)); font-family: 'JetBrains Mono', monospace; }
+
+    /* ── Signal bars ─────────────────────────────────────────────────── */
+    .signal-list { display: flex; flex-direction: column; gap: 12px; }
+
+    .signal-row { display: flex; flex-direction: column; gap: 5px; }
+
+    .signal-header { display: flex; justify-content: space-between; align-items: baseline; }
+
+    .signal-name { font-size: 12px; font-weight: 500; color: var(--text-dim); }
+
+    .signal-val {
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+    }
+
+    .signal-band-tag {
+      font-size: 9px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .signal-track { height: 5px; background: var(--bg3); border-radius: 10px; overflow: hidden; }
+
+    .signal-fill {
+      height: 100%;
+      border-radius: 10px;
+      transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* ── Role fit ────────────────────────────────────────────────────── */
+    .role-fit-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--bg3);
+      margin-bottom: 14px;
+    }
+
+    .match-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+
+    .match-strong   { background: #064e3b44; border: 1px solid #34d39966; color: #34d399; }
+    .match-moderate { background: #1e3a5f44; border: 1px solid #60a5fa66; color: #60a5fa; }
+    .match-partial  { background: #44340044; border: 1px solid #fbbf2466; color: #fbbf24; }
+    .match-low      { background: #45100044; border: 1px solid #f8717166; color: #f87171; }
+
+    .gap-list { font-size: 11px; color: var(--text-muted); line-height: 1.7; }
+    .gap-item { color: var(--danger); font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+
+    /* ── Radar ───────────────────────────────────────────────────────── */
+    .radar-wrap { display: flex; justify-content: center; margin: 4px 0; }
+    svg.radar { overflow: visible; }
+
+    /* ── Raw features ────────────────────────────────────────────────── */
+    .feat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    .feat-cell {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+    }
+
+    .feat-name {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 3px;
+    }
+
+    .feat-tag {
+      display: inline-block;
+      font-size: 8px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 4px;
+      margin-left: 4px;
+      letter-spacing: 0.05em;
+      vertical-align: middle;
+    }
+
+    .tag-a { background: #3b82f620; color: var(--accent); }
+    .tag-b { background: #10b98120; color: var(--success); }
+    .tag-ab { background: #6366f120; color: var(--purple); }
+
+    .feat-val {
+      font-size: 14px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text);
+    }
+
+    /* ── Description ─────────────────────────────────────────────────── */
+    .desc-text {
+      font-size: 13px;
+      line-height: 1.8;
+      color: var(--text-dim);
+      font-style: italic;
+      border-left: 3px solid var(--accent);
+      padding-left: 14px;
+    }
+
+    /* ── Transcript ──────────────────────────────────────────────────── */
+    .transcript-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.8;
+      color: var(--text-muted);
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    /* ── Meta ────────────────────────────────────────────────────────── */
+    .meta-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    .meta-chip {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 500; color: var(--text-muted);
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 20px; padding: 3px 10px;
+    }
+
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+
+    .review-flag {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; border-radius: var(--radius-sm);
+      background: #45160033; border: 1px solid #f59e0b55;
+      font-size: 12px; color: var(--warn);
+      font-weight: 600;
+    }
+
+    .gmm-notice {
+      display: flex; align-items: center; gap: 8px;
+      padding: 9px 12px; border-radius: var(--radius-sm);
+      background: #1e2d4a33; border: 1px solid var(--border);
+      font-size: 11px; color: var(--text-muted);
+    }
+
+    /* ── JSON ────────────────────────────────────────────────────────── */
+    details summary {
+      cursor: pointer; font-size: 11px; font-weight: 600;
+      color: var(--text-muted); padding: 8px 0; user-select: none;
+      display: flex; align-items: center; gap: 6px;
+    }
+    details summary::marker,
+    details summary::-webkit-details-marker { display: none; }
+
+    .json-view {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: #94a3b8;
+      overflow-x: auto;
+      white-space: pre;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    /* ── 2-col grid ──────────────────────────────────────────────────── */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+    @media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } }
+
+    /* ── Scrollbar ───────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+
+    /* ── Divider ─────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px; background: var(--border);
+      margin: 2px 0;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Header -->
+  <header>
+    <div class="logo">🎙️</div>
+    <div>
+      <h1>Audio Analysis V2 — Debug Tester</h1>
+      <div class="subtitle">Zeko Unified Communication Framework · System A + B · All Parameters</div>
+    </div>
+    <span class="badge-debug">⚠ INTERNAL DEBUG VIEW</span>
+  </header>
+
+  <main>
+    <!-- Control Panel -->
+    <aside class="ctrl">
+
+      <div>
+        <div class="section-label">API Endpoint</div>
+        <div class="field">
+          <label for="api-base">Base URL</label>
+          <input type="text" id="api-base" value="http://localhost:8001" placeholder="http://localhost:8001" />
+        </div>
+      </div>
+
+      <div>
+        <div class="section-label">Request</div>
+        <div class="field">
+          <label for="response-id">Response ID</label>
+          <input type="text" id="response-id" placeholder="e.g. 683521e6e5f5…" autocomplete="off" />
+        </div>
+      </div>
+
+      <!-- System A role profile -->
+      <div>
+        <div class="section-label">System A — Skills Weight Profile</div>
+        <div class="field">
+          <label for="role-profile">Role Profile</label>
+          <select id="role-profile">
+            <option value="default">Default (equal weights)</option>
+            <option value="client_facing">Client-Facing / Sales</option>
+            <option value="technical">Backend / Technical</option>
+            <option value="leadership">Leadership / Managerial</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- System B style role -->
+      <div>
+        <div class="section-label">System B — Style Role Target</div>
+        <div class="field">
+          <label for="style-role">Style Role</label>
+          <select id="style-role">
+            <option value="default">No specific role</option>
+            <option value="software_engineer">Software Engineer</option>
+            <option value="sales">Sales Representative</option>
+            <option value="product_manager">Product Manager</option>
+            <option value="team_lead">Team Lead / Manager</option>
+            <option value="data_scientist">Data Scientist</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <div class="section-label">Options</div>
+        <div class="toggle-row">
+          <span class="toggle-lbl">Include LLM description</span>
+          <label class="toggle">
+            <input type="checkbox" id="include-description" checked />
+            <span class="tslider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-lbl">Force re-run (evict cache)</span>
+          <label class="toggle">
+            <input type="checkbox" id="force-rerun" />
+            <span class="tslider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-direction:column;">
+        <button class="btn btn-primary" id="run-btn" onclick="runAnalysis()">
+          <span>▶</span> Run Analysis
+        </button>
+        <button class="btn btn-ghost" onclick="clearResults()">
+          🗑 Clear Results
+        </button>
+      </div>
+
+      <div class="status-bar" id="status-bar">
+        <div class="spinner" id="spinner"></div>
+        <span id="status-text">Running…</span>
+      </div>
+
+      <div>
+        <div class="section-label">Request Log</div>
+        <div class="log-box" id="log-box">
+          <div class="log-entry"><span class="t">--:--:--</span><span>Waiting…</span></div>
+        </div>
+      </div>
+
+      <!-- Feature key -->
+      <div>
+        <div class="section-label">Feature Tag Key</div>
+        <div style="display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--text-muted);">
+          <div><span class="feat-tag tag-a">A</span> System A only</div>
+          <div><span class="feat-tag tag-b">B</span> System B only</div>
+          <div><span class="feat-tag tag-ab">A+B</span> Shared by both</div>
+        </div>
+      </div>
+
+      <!-- Archetype quick ref -->
+      <div>
+        <div class="section-label">Archetype Reference</div>
+        <div style="display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--text-muted);">
+          <div>🏛️ <b style="color:#6366f1">Architect</b> — Systematic, logical</div>
+          <div>🤝 <b style="color:#10b981">Connector</b> — Collaborative, people-first</div>
+          <div>🔀 <b style="color:#f59e0b">Synthesizer</b> — Balanced, adaptable</div>
+          <div>🔬 <b style="color:#3b82f6">Analyst</b> — Data-driven, precise</div>
+          <div>⚡ <b style="color:#ef4444">Pragmatist</b> — Action-oriented, fast</div>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Results -->
+    <section class="results" id="results-panel">
+      <div class="placeholder" id="placeholder">
+        <div class="placeholder-icon">📊</div>
+        <h2>No Analysis Yet</h2>
+        <p>Enter a Response ID, choose role profiles, and click <strong>Run Analysis</strong>. All System A and System B outputs will appear here.</p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    /* ── Constants ─────────────────────────────────────────────────── */
+    const ARCH_META = {
+      architect:   { emoji: '🏛️', color: '#6366f1', label: 'Architect' },
+      connector:   { emoji: '🤝', color: '#10b981', label: 'Connector' },
+      synthesizer: { emoji: '🔀', color: '#f59e0b', label: 'Synthesizer' },
+      analyst:     { emoji: '🔬', color: '#3b82f6', label: 'Analyst' },
+      pragmatist:  { emoji: '⚡', color: '#ef4444', label: 'Pragmatist' },
+    };
+
+    const SIGNAL_COLORS = {
+      systematic_thinking:       '#6366f1',
+      collaborative_orientation: '#10b981',
+      analytical_precision:      '#3b82f6',
+      expressive_engagement:     '#f59e0b',
+      action_orientation:        '#ef4444',
+    };
+
+    const SIGNAL_LABELS = {
+      systematic_thinking:       'Systematic Thinking',
+      collaborative_orientation: 'Collaborative Orientation',
+      analytical_precision:      'Analytical Precision',
+      expressive_engagement:     'Expressive Engagement',
+      action_orientation:        'Action Orientation',
+    };
+
+    const AXIS_COLORS = {
+      fluency:            '#38bdf8',
+      intelligibility:    '#818cf8',
+      lexical_structural: '#34d399',
+      narrative_evidence: '#fb923c',
+      vocal_delivery:     '#e879f9',
+    };
+
+    const AXIS_LABELS = {
+      fluency:            'Fluency',
+      intelligibility:    'Intelligibility',
+      lexical_structural: 'Lexical & Structural',
+      narrative_evidence: 'Narrative & Evidence',
+      vocal_delivery:     'Vocal Delivery',
+    };
+
+    // All raw features with labels and which system uses them
+    const FEAT_META = {
+      // Fluency
+      speech_rate_wpm:              { label: 'Speech Rate (WPM)',        sys: 'AB', dec: 1 },
+      speech_rate_variability:      { label: 'Rate Variability',         sys: 'B',  dec: 3 },
+      filler_word_ratio:            { label: 'Filler Rate',              sys: 'AB', dec: 4 },
+      fluency_pause_dur:            { label: 'Mean Pause Dur (s)',        sys: 'A',  dec: 2 },
+      fluency_pause_freq:           { label: 'Pause Count',              sys: 'A',  dec: 0 },
+      // Intelligibility
+      intel_confidence:             { label: 'ASR Confidence (corrected)', sys: 'A', dec: 4 },
+      // Lexical
+      lexical_mattr:                { label: 'MATTR (vocab diversity)',  sys: 'AB', dec: 4 },
+      lexical_rare_word_ratio:      { label: 'Rare Word Ratio',          sys: 'A',  dec: 4 },
+      vocabulary_density:           { label: 'Vocab Density (legacy)',   sys: 'B',  dec: 4 },
+      total_words:                  { label: 'Total Words',              sys: 'A',  dec: 0 },
+      // Discourse
+      discourse_connectors:         { label: 'Discourse Connectors',     sys: 'A',  dec: 0 },
+      discourse_tier1:              { label: 'Tier-1 Connectors',        sys: 'A',  dec: 0 },
+      sbert_coherence:              { label: 'SBERT Coherence',          sys: 'A',  dec: 4 },
+      logical_connector_density:    { label: 'Connector Density (legacy)', sys: 'B', dec: 4 },
+      // Narrative
+      ner_entity_density:           { label: 'Entity Density (e/min)',   sys: 'A',  dec: 3 },
+      metric_density:               { label: 'Metric Density (n/min)',   sys: 'AB', dec: 3 },
+      narrative_arc_score:          { label: 'Narrative Arc Score',      sys: 'A',  dec: 2 },
+      // Interpersonal
+      collaborative_language_ratio: { label: 'Collab Language Ratio',   sys: 'B',  dec: 3 },
+      question_density:             { label: 'Question Density (q/min)', sys: 'B',  dec: 3 },
+      empathetic_language_score:    { label: 'Empathy Score',            sys: 'B',  dec: 3 },
+      avg_sentence_length:          { label: 'Avg Sentence Length',      sys: 'B',  dec: 1 },
+      // Vocal
+      pitch_variation:              { label: 'Pitch CV (dialect-neutral)', sys: 'AB', dec: 4 },
+      vocal_confidence:             { label: 'Vocal Confidence',         sys: 'AB', dec: 4 },
+      speech_fluency:               { label: 'Speech Fluency Score',     sys: 'AB', dec: 4 },
+      stress_markers:               { label: 'Composure Score',          sys: 'B',  dec: 4 },
+      voiced_fraction:              { label: 'Voiced Fraction',          sys: 'A',  dec: 4 },
+    };
+
+    /* ── Helpers ───────────────────────────────────────────────────── */
+    function ts() {
+      return new Date().toLocaleTimeString('en-US', { hour12: false });
+    }
+
+    function addLog(msg, type = '') {
+      const box = document.getElementById('log-box');
+      const e = document.createElement('div');
+      e.className = 'log-entry';
+      e.innerHTML = `<span class="t">${ts()}</span><span class="${type}">${msg}</span>`;
+      box.appendChild(e);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function setStatus(state, msg) {
+      const bar = document.getElementById('status-bar');
+      bar.className = `status-bar show ${state}`;
+      document.getElementById('status-text').textContent = msg;
+      document.getElementById('spinner').style.display = state === 'running' ? 'block' : 'none';
+    }
+
+    function setBusy(b) { document.getElementById('run-btn').disabled = b; }
+
+    function bandClass(band) {
+      if (!band) return '';
+      const b = band.toLowerCase().replace(/\s/g, '-');
+      return `band-${b}`;
+    }
+
+    function axisColor(key) { return AXIS_COLORS[key] || '#64748b'; }
+
+    function signalBand(val) {
+      if (val >= 75) return '● STRONG';
+      if (val >= 50) return '◉ MODERATE';
+      if (val >= 25) return '○ WEAK';
+      return '· MINIMAL';
+    }
+
+    function matchClass(match) {
+      return { strong: 'match-strong', moderate: 'match-moderate', partial: 'match-partial', low: 'match-low' }[match] || '';
+    }
+
+    /* ── Run analysis ──────────────────────────────────────────────── */
+    async function runAnalysis() {
+      const apiBase    = document.getElementById('api-base').value.trim().replace(/\/$/, '');
+      const responseId = document.getElementById('response-id').value.trim();
+      const includeDesc = document.getElementById('include-description').checked;
+      const forceRerun  = document.getElementById('force-rerun').checked;
+      const roleProfile = document.getElementById('role-profile').value;
+      const styleRole   = document.getElementById('style-role').value;
+
+      if (!responseId) { setStatus('error', 'Please enter a Response ID'); return; }
+
+      setBusy(true);
+      setStatus('running', 'Running analysis…');
+      addLog(`POST /v2/analyze [${responseId}] role=${roleProfile} style=${styleRole}`);
+
+      if (forceRerun) {
+        try {
+          await fetch(`${apiBase}/v2/result/${responseId}`, { method: 'DELETE' });
+          addLog('Cache evicted (force re-run)', 'ok');
+        } catch { /* ignore */ }
+      }
+
+      let data;
+      try {
+        const t0 = Date.now();
+        const resp = await fetch(`${apiBase}/v2/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            response_id: responseId,
+            include_description: includeDesc,
+            role_profile: roleProfile,
+            style_role: styleRole,
+          }),
+        });
+        const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+          throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+
+        data = await resp.json();
+        addLog(`✓ ${resp.status} OK in ${elapsed}s — status: ${data.status}`, 'ok');
+        setStatus('success', `Done in ${elapsed}s`);
+      } catch (e) {
+        addLog(`✗ ${e.message}`, 'er');
+        setStatus('error', e.message);
+        setBusy(false);
+        return;
+      }
+
+      setBusy(false);
+      renderResults(data);
+    }
+
+    /* ── Radar SVG ─────────────────────────────────────────────────── */
+    function buildRadar(signals, size = 260) {
+      const keys = Object.keys(SIGNAL_LABELS);
+      const N = keys.length;
+      const cx = size / 2, cy = size / 2, R = size * 0.4;
+      const angles = keys.map((_, i) => (2 * Math.PI * i) / N - Math.PI / 2);
+
+      const polar = (r, a) => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+
+      let rings = '';
+      for (let r = 25; r <= 100; r += 25) {
+        const pts = angles.map(a => polar(R * r / 100, a)).map(p => p.join(',')).join(' ');
+        rings += `<polygon points="${pts}" fill="none" stroke="#1a2744" stroke-width="1"/>`;
+        if (r < 100) {
+          const [lx, ly] = polar(R * r / 100 + 4, -Math.PI / 2);
+          rings += `<text x="${lx + 3}" y="${ly}" font-size="8" fill="#334155" font-family="JetBrains Mono">${r}</text>`;
+        }
+      }
+
+      let axes = '';
+      angles.forEach((a, i) => {
+        const [x2, y2] = polar(R, a);
+        const [lx, ly] = polar(R + 20, a);
+        const anchor = Math.abs(Math.cos(a)) < 0.1 ? 'middle' : (Math.cos(a) > 0 ? 'start' : 'end');
+        const words = keys[i].split('_').map(w => w[0].toUpperCase() + w.slice(1));
+        const line1 = words.slice(0, 2).join(' ');
+        const line2 = words.slice(2).join(' ');
+        axes += `<line x1="${cx}" y1="${cy}" x2="${x2}" y2="${y2}" stroke="#1a2744" stroke-width="1"/>`;
+        axes += `<text x="${lx}" y="${ly}" text-anchor="${anchor}" dominant-baseline="middle" font-size="9" fill="#64748b" font-family="Inter,sans-serif">${line1}</text>`;
+        if (line2) axes += `<text x="${lx}" y="${ly + 11}" text-anchor="${anchor}" font-size="9" fill="#64748b" font-family="Inter,sans-serif">${line2}</text>`;
+      });
+
+      const vals = keys.map(k => (signals[k] || 0) / 100);
+      const pts = vals.map((v, i) => polar(R * v, angles[i])).map(p => p.join(',')).join(' ');
+      const poly = `<polygon points="${pts}" fill="#3b82f618" stroke="#3b82f6" stroke-width="2"/>`;
+      const dots = vals.map((v, i) => {
+        const [x, y] = polar(R * v, angles[i]);
+        return `<circle cx="${x}" cy="${y}" r="4" fill="#3b82f6" stroke="#080b14" stroke-width="2"/>`;
+      }).join('');
+
+      return `<svg class="radar" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${rings}${axes}${poly}${dots}</svg>`;
+    }
+
+    /* ── Tab switching ─────────────────────────────────────────────── */
+    function switchTab(id) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === id));
+    }
+
+    /* ── Main render ───────────────────────────────────────────────── */
+    function renderResults(data) {
+      const panel = document.getElementById('results-panel');
+      document.getElementById('placeholder').style.display = 'none';
+      const old = document.getElementById('result-root');
+      if (old) old.remove();
+
+      const root = document.createElement('div');
+      root.id = 'result-root';
+      root.style.cssText = 'display:flex;flex-direction:column;gap:20px;';
+
+      if (data.status === 'error') {
+        root.innerHTML = `<div class="card" style="border-color:var(--danger)">
+          <div class="card-title" style="color:var(--danger)">⚠ Pipeline Error</div>
+          <div style="color:#fca5a5;font-size:13px;">${data.error || 'Unknown error'}</div>
+        </div>`;
+        panel.appendChild(root);
+        return;
+      }
+
+      const skills  = data.skills || {};
+      const style   = data.style_profile || {};
+      const signals = style.systematic_thinking !== undefined ? style : (data.signals || {});
+      const blend   = style.archetype_blend || data.archetype_blend || {};
+      const raw     = data.raw_features || {};
+      const dom     = style.dominant_archetype || data.dominant_archetype || '';
+      const dur     = data.duration_ms ? (data.duration_ms / 60000).toFixed(1) + ' min' : '—';
+      const roleFit = style.role_fit || {};
+
+      /* Meta */
+      root.innerHTML += `
+        <div class="meta-row">
+          <div class="meta-chip"><span class="dot"></span>Response ID: <b>${data.response_id}</b></div>
+          <div class="meta-chip">⏱ Duration: <b>${dur}</b></div>
+          <div class="meta-chip">🏆 Style: <b style="color:${ARCH_META[dom]?.color||'#fff'}">${ARCH_META[dom]?.label||dom}</b></div>
+          ${skills.composite_score !== undefined ? `<div class="meta-chip">📊 Skills: <b>${skills.composite_score}/100 (${skills.composite_band})</b></div>` : ''}
+          ${skills.review_required ? '<div class="meta-chip" style="border-color:var(--warn);color:var(--warn)">⚠ Review Required</div>' : ''}
+        </div>`;
+
+      /* Review flag */
+      if (skills.review_required) {
+        root.innerHTML += `<div class="review-flag">⚠️ Human review triggered — check axis flags for reason</div>`;
+      }
+
+      /* Tabs */
+      const tabBar = document.createElement('div');
+      tabBar.innerHTML = `
+        <div class="tab-row" id="tab-row">
+          <button class="tab-btn active" data-tab="tab-sys-a" onclick="switchTab('tab-sys-a')">System A — Skills</button>
+          <button class="tab-btn" data-tab="tab-sys-b" onclick="switchTab('tab-sys-b')">System B — Style</button>
+          <button class="tab-btn" data-tab="tab-features" onclick="switchTab('tab-features')">Raw Features (${Object.keys(raw).length})</button>
+          <button class="tab-btn" data-tab="tab-transcript" onclick="switchTab('tab-transcript')">Transcript</button>
+          <button class="tab-btn" data-tab="tab-json" onclick="switchTab('tab-json')">Raw JSON</button>
+        </div>`;
+      root.appendChild(tabBar);
+
+      /* ── TAB: System A ── */
+      const tabA = document.createElement('div');
+      tabA.className = 'tab-panel active';
+      tabA.id = 'tab-sys-a';
+
+      if (!skills.fluency) {
+        tabA.innerHTML = '<div class="card" style="color:var(--text-muted);font-size:13px;">System A data not available in this response.</div>';
+      } else {
+        // Composite hero
+        const compColor = { Excellent: '#34d399', Good: '#60a5fa', Average: '#fbbf24', 'Below Average': '#f97316', Poor: '#f87171' }[skills.composite_band] || '#94a3b8';
+        tabA.innerHTML += `
+          <div class="card">
+            <div class="card-title">📊 Skills Composite Score
+              <span class="pill" style="background:${compColor}18;border:1px solid ${compColor}55;color:${compColor}">${skills.role_profile || 'default'} profile</span>
+              ${skills.grammar_pending ? '<span class="pill" style="background:#44340044;border:1px solid #fbbf2444;color:#fbbf24">Grammar axis pending (20% reserved)</span>' : ''}
+            </div>
+            <div class="composite-hero">
+              <div class="composite-score" style="color:${compColor}">${skills.composite_score?.toFixed(1) ?? '—'}</div>
+              <div>
+                <div class="composite-label">/ 100</div>
+                <div class="composite-band ${bandClass(skills.composite_band)}" style="margin-top:4px;">${skills.composite_band}</div>
+              </div>
+            </div>
+          </div>`;
+
+        // Axis breakdown
+        const axisOrder = ['fluency', 'intelligibility', 'lexical_structural', 'narrative_evidence', 'vocal_delivery'];
+        const axisBars = axisOrder.map(key => {
+          const ax = skills[key] || {};
+          const score = ax.score ?? 0;
+          const pct = (score / 5) * 100;
+          const color = axisColor(key);
+          const band = ax.band || '';
+          const flags = ax.flags || [];
+          const conf = ax.confidence ?? 1;
+          return `
+            <div class="axis-row">
+              <div class="axis-header">
+                <div class="axis-left">
+                  <div class="axis-dot" style="background:${color}"></div>
+                  <span class="axis-name">${AXIS_LABELS[key]}</span>
+                </div>
+                <div class="axis-right">
+                  <span class="axis-score" style="color:${color}">${score.toFixed(2)}</span>
+                  <span class="axis-band-tag ${bandClass(band)}">${band}</span>
+                </div>
+              </div>
+              <div class="axis-track">
+                <div class="axis-fill" style="width:${pct}%;background:linear-gradient(90deg,${color}66,${color})"></div>
+              </div>
+              <div class="axis-meta">
+                <span class="conf-chip">conf: ${(conf * 100).toFixed(0)}%</span>
+                ${flags.map(f => `<span class="flag-chip">${f}</span>`).join('')}
+              </div>
+            </div>`;
+        }).join('');
+
+        tabA.innerHTML += `
+          <div class="card">
+            <div class="card-title">🎯 5-Axis Breakdown (each 0–5)</div>
+            <div class="axis-list">${axisBars}</div>
+          </div>`;
+      }
+
+      root.appendChild(tabA);
+
+      /* ── TAB: System B ── */
+      const tabB = document.createElement('div');
+      tabB.className = 'tab-panel';
+      tabB.id = 'tab-sys-b';
+
+      // GMM notice
+      tabB.innerHTML += `
+        <div class="gmm-notice">
+          🔬 Archetype classification uses cosine similarity (rule-based).
+          GMM will replace this after 50+ labeled interviews.
+          Centroid version: <b style="font-family:'JetBrains Mono';margin-left:6px;">${style.centroid_version || 'v0-n86-june2026'}</b>
+        </div>`;
+
+      // Role fit
+      if (roleFit.match && roleFit.match !== 'n/a') {
+        const gaps = roleFit.required_gaps || [];
+        const met  = roleFit.met_requirements || [];
+        tabB.innerHTML += `
+          <div class="card">
+            <div class="card-title">🎯 Role-Fit Assessment — ${(roleFit.role || '').replace(/_/g,' ')}</div>
+            <div class="role-fit-bar">
+              <span class="match-badge ${matchClass(roleFit.match)}">${roleFit.match?.toUpperCase()}</span>
+              <div>
+                ${met.length ? `<div style="font-size:11px;color:var(--success)">✓ Met: ${met.map(s=>s.replace(/_/g,' ')).join(' · ')}</div>` : ''}
+                ${gaps.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px;">✗ Gaps: ${gaps.join(' · ')}</div>` : ''}
+              </div>
+            </div>
+          </div>`;
+      }
+
+      // Description
+      if (data.description) {
+        tabB.innerHTML += `
+          <div class="card">
+            <div class="card-title">💬 Communication Style Profile</div>
+            <p class="desc-text">${data.description}</p>
+          </div>`;
+      }
+
+      // Archetype blend
+      const archOrder = ['architect','connector','synthesizer','analyst','pragmatist'];
+      const archCells = archOrder.map(key => {
+        const m = ARCH_META[key];
+        const pct = (typeof blend === 'object' ? blend[key] : 0) || 0;
+        const isDom = key === dom;
+        return `
+          <div class="arch-cell ${isDom ? 'dom' : ''}" style="--cell-c:${m.color}">
+            <span class="arch-emoji">${m.emoji}</span>
+            <span class="arch-name">${m.label}</span>
+            <span class="arch-pct">${pct.toFixed(1)}%</span>
+          </div>`;
+      }).join('');
+
+      tabB.innerHTML += `
+        <div class="card">
+          <div class="card-title">🧩 Archetype Blend</div>
+          <div class="arch-grid">${archCells}</div>
+        </div>`;
+
+      // Signals + radar
+      const sigBars = Object.keys(SIGNAL_LABELS).map(key => {
+        const val = signals[key] || 0;
+        const color = SIGNAL_COLORS[key];
+        return `
+          <div class="signal-row">
+            <div class="signal-header">
+              <span class="signal-name">${SIGNAL_LABELS[key]}</span>
+              <span class="signal-val" style="color:${color}">${val.toFixed(0)} <span class="signal-band-tag">${signalBand(val)}</span></span>
+            </div>
+            <div class="signal-track">
+              <div class="signal-fill" style="width:${val}%;background:linear-gradient(90deg,${color}77,${color})"></div>
+            </div>
+          </div>`;
+      }).join('');
+
+      tabB.innerHTML += `
+        <div class="card two-col">
+          <div>
+            <div class="card-title">📡 Communication Signals</div>
+            <div class="signal-list">${sigBars}</div>
+          </div>
+          <div>
+            <div class="card-title">🕸️ Signal Radar</div>
+            <div class="radar-wrap">${buildRadar(signals)}</div>
+          </div>
+        </div>`;
+
+      root.appendChild(tabB);
+
+      /* ── TAB: Raw Features ── */
+      const tabF = document.createElement('div');
+      tabF.className = 'tab-panel';
+      tabF.id = 'tab-features';
+
+      const featCells = Object.entries(FEAT_META).map(([key, meta]) => {
+        const val = raw[key];
+        if (val === undefined || val === null) return '';
+        const disp = typeof val === 'number' ? val.toFixed(meta.dec) : val;
+        const tagMap = { A: 'tag-a', B: 'tag-b', AB: 'tag-ab' };
+        const tagClass = tagMap[meta.sys] || '';
+        return `
+          <div class="feat-cell">
+            <div class="feat-name">${meta.label}<span class="feat-tag ${tagClass}">${meta.sys}</span></div>
+            <div class="feat-val">${disp}</div>
+          </div>`;
+      }).join('');
+
+      tabF.innerHTML += `
+        <div class="card">
+          <div class="card-title">🔬 All Raw Features</div>
+          <div class="feat-grid">${featCells}</div>
+        </div>`;
+
+      root.appendChild(tabF);
+
+      /* ── TAB: Transcript ── */
+      const tabT = document.createElement('div');
+      tabT.className = 'tab-panel';
+      tabT.id = 'tab-transcript';
+      tabT.innerHTML = data.transcript
+        ? `<div class="card"><div class="card-title">📝 Transcript</div><div class="transcript-box">${data.transcript}</div></div>`
+        : `<div class="card" style="color:var(--text-muted);font-size:13px;">No transcript in response.</div>`;
+      root.appendChild(tabT);
+
+      /* ── TAB: Raw JSON ── */
+      const tabJ = document.createElement('div');
+      tabJ.className = 'tab-panel';
+      tabJ.id = 'tab-json';
+      tabJ.innerHTML = `
+        <div class="card">
+          <details open>
+            <summary>▼ Full JSON Response</summary>
+            <div class="json-view">${JSON.stringify(data, null, 2)}</div>
+          </details>
+        </div>`;
+      root.appendChild(tabJ);
+
+      panel.appendChild(root);
+
+      // Animate bars
+      requestAnimationFrame(() => {
+        document.querySelectorAll('.signal-fill, .axis-fill').forEach(el => {
+          const w = el.style.width;
+          el.style.width = '0%';
+          requestAnimationFrame(() => { el.style.width = w; });
+        });
+      });
+    }
+
+    function clearResults() {
+      document.getElementById('placeholder').style.display = '';
+      const old = document.getElementById('result-root');
+      if (old) old.remove();
+      document.getElementById('status-bar').className = 'status-bar';
+    }
+
+    document.getElementById('response-id').addEventListener('keydown', e => {
+      if (e.key === 'Enter') runAnalysis();
+    });
+  </script>
+</body>
+</html>
