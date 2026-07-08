@@ -19,7 +19,7 @@ TEST_FILE = ROOT / "proctoring_test.json"
 OUTPUT_FILE = ROOT / "academic_violation_test_result.json"
 API_URL = os.getenv(
     "PROCTORING_API_URL",
-    "http://127.0.0.1:8002/v3/internal/analyse/{response_id}/proctoring",
+    "http://127.0.0.1:8002/v4/internal/analyse/{response_id}/proctoring",
 )
 INTERNAL_TOKEN = os.getenv("INTERNAL_PROCTORING_TOKEN", "")
 REQUEST_TIMEOUT = int(os.getenv("PROCTORING_TIMEOUT_SEC", "1800"))
@@ -59,15 +59,15 @@ def normalize_error(response_id: str, status_code: int | None, detail: str) -> d
         error_type = "request_error"
     return {
         "response_id": response_id,
-        "status": "failure",
+        "status": "fail",
         "error": {
             "type": error_type,
             "status_code": status_code,
             "detail": detail,
         },
-        "question_review": [],
-        "flagged_quuestions": [],
-        "schema_version": "v2",
+        "flagged_questions": [],
+        "question_evidence": [],
+        "schema_version": "v4",
     }
 
 

@@ -507,6 +507,20 @@ async def get_raw_features(response_id: str):
 
 
 @app.get(
+    "/v4/internal/analyse/{response_id}/proctoring",
+    summary="Internal proctor review V4",
+    description=(
+        "Question-level academic violation evidence for internal proctoring only (V4 schema)."
+    ),
+)
+async def analyse_proctoring_v4(
+    response_id: str,
+    internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    return await analyse_proctoring(response_id, internal_token)
+
+
+@app.get(
     "/v3/internal/analyse/{response_id}/proctoring",
     summary="Internal proctor review",
     description=(
@@ -527,33 +541,64 @@ async def analyse_proctoring(
 
     try:
         entry = await _get_or_extract_features(response_id)
+        # score_interview handles sorting, eligibility gate, and off-by-one safety
+        # internally — it will never produce a result for a q_no beyond what exists
+        # in entry.question_results.
+        evidence_payloads = await _run_in_thread(score_interview, entry.question_results)
+
+        flagged_questions = [
+            p["q_no"]
+            for p in evidence_payloads
+            if p.get("flagged_for_review") is True
+        ]
+
+        logger.info(
+            "[%s] Proctoring complete — %d questions scored, %d flagged",
+            response_id,
+            sum(1 for p in evidence_payloads if p.get("evaluable")),
+            len(flagged_questions),
+        )
+
+        status = "success"
+
+        filtered_evidence = []
+        for p in evidence_payloads:
+            if p.get("flagged_for_review") is True:
+                filtered_evidence.append({
+                    "q_no": p["q_no"],
+                    "evaluable": p.get("evaluable"),
+                    "not_evaluable_reason": p.get("not_evaluable_reason"),
+                    "suspicion_score": p.get("suspicion_score"),
+                    "flagged_for_review": p.get("flagged_for_review"),
+                    "top_contributing_features": p.get("top_contributing_features", []),
+                    "low_answer_count_reduced_confidence": p.get("low_answer_count_reduced_confidence", False)
+                })
+
+        return {
+            "response_id": response_id,
+            "status": status,
+            "flagged_questions": flagged_questions,
+            "question_evidence": filtered_evidence,
+            "schema_version": "v4",
+        }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.error("Error during proctoring analysis for %s: %s", response_id, str(exc))
+        err_msg = str(exc)
+        err_type = "request_error"
+        if "not found" in err_msg.lower() or "no recordings" in err_msg.lower() or "404" in err_msg:
+            err_type = "not_found"
 
-    # score_interview handles sorting, eligibility gate, and off-by-one safety
-    # internally — it will never produce a result for a q_no beyond what exists
-    # in entry.question_results.
-    evidence_payloads = await _run_in_thread(score_interview, entry.question_results)
-
-    flagged_questions = [
-        p["q_no"]
-        for p in evidence_payloads
-        if p.get("flagged_for_review") is True
-    ]
-
-    logger.info(
-        "[%s] Proctoring complete — %d questions scored, %d flagged",
-        response_id,
-        sum(1 for p in evidence_payloads if p.get("evaluable")),
-        len(flagged_questions),
-    )
-
-    return {
-        "response_id": response_id,
-        "flagged_questions": flagged_questions,
-        "question_evidence": evidence_payloads,
-        "schema_version": "v3",
-    }
+        return {
+            "response_id": response_id,
+            "status": "fail",
+            "error": {
+                "type": err_type,
+                "detail": err_msg,
+            },
+            "flagged_questions": [],
+            "question_evidence": [],
+            "schema_version": "v4",
+        }
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
