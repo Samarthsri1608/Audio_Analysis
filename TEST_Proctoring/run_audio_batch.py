@@ -481,36 +481,85 @@ async def main_async(args: argparse.Namespace) -> None:
     # ── Load ground truth for CSV join ────────────────────────────────────────
     gt = load_ground_truth()
 
-    # ── Run batch ─────────────────────────────────────────────────────────────
-    results: list[dict] = []
-    sem = asyncio.Semaphore(args.concurrency)
+    # ── Load existing progress if any ─────────────────────────────────────────
+    results_map: dict[tuple[str, str], dict] = {}
+    if OUTPUT_JSON.exists():
+        try:
+            with open(OUTPUT_JSON, encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    for r in data:
+                        if isinstance(r, dict):
+                            cid = r.get("candidate_id")
+                            jid = r.get("job_id")
+                            if cid and jid:
+                                results_map[(cid, jid)] = r
+            logger.info("Found existing output_audio.json. Loaded %d previous results.", len(results_map))
+        except Exception as e:
+            logger.warning("Could not read/parse existing output_audio.json (%s). Starting fresh.", e)
 
+    # Filter candidates to process (only skip if they succeeded previously)
+    successful_runs = {k: v for k, v in results_map.items() if v.get("status") == "success"}
+    to_process = [
+        item for item in candidates
+        if (item["candidate_id"], item["job_id"]) not in successful_runs
+    ]
+
+    logger.info(
+        "Processing %d candidates (%d already succeeded and skipped, %d total candidates in links file)",
+        len(to_process), len(successful_runs), len(candidates)
+    )
+
+    sem = asyncio.Semaphore(args.concurrency)
     custom_headers = args.header or []
 
     async with httpx.AsyncClient(timeout=1800.0) as client:
 
         async def worker(item: dict) -> None:
             async with sem:
-                res = await process_single_candidate(
-                    client, item,
-                    auth_token=args.auth,
-                    cookie=args.cookie,
-                    custom_headers=custom_headers,
-                    api_base_url=args.api_url,
-                )
-                results.append(res)
+                attempts = 3
+                res = None
+                for attempt in range(1, attempts + 1):
+                    res = await process_single_candidate(
+                        client, item,
+                        auth_token=args.auth,
+                        cookie=args.cookie,
+                        custom_headers=custom_headers,
+                        api_base_url=args.api_url,
+                    )
+                    if res.get("status") == "success":
+                        break
+                    
+                    logger.warning(
+                        "[%s] Attempt %d/%d failed for candidate=%s. Error: %s",
+                        res.get("response_id") or "no-response-id",
+                        attempt, attempts,
+                        item["candidate_id"],
+                        res.get("error", {}).get("detail", "unknown")
+                    )
+                    if attempt < attempts:
+                        await asyncio.sleep(2)
+                
+                # Update map with new result (replacing old fail/non-existent entry)
+                results_map[(item["candidate_id"], item["job_id"])] = res
+                
                 # Write intermediate JSON after every candidate — safe against crashes
-                OUTPUT_JSON.write_text(json.dumps(results, indent=2), encoding="utf-8")
+                current_results = list(results_map.values())
+                OUTPUT_JSON.write_text(json.dumps(current_results, indent=2), encoding="utf-8")
 
-        tasks = [worker(item) for item in candidates]
+        tasks = [worker(item) for item in to_process]
         await asyncio.gather(*tasks)
 
-    # ── Final JSON ────────────────────────────────────────────────────────────
-    OUTPUT_JSON.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    logger.info("JSON written → %s (%d records)", OUTPUT_JSON, len(results))
+    # ── Final JSON and CSV ────────────────────────────────────────────────────
+    final_results = list(results_map.values())
+    OUTPUT_JSON.write_text(json.dumps(final_results, indent=2), encoding="utf-8")
+    logger.info("JSON written → %s (%d records)", OUTPUT_JSON, len(final_results))
 
     # ── Convert to CSV ────────────────────────────────────────────────────────
-    json_to_csv(results, gt)
+    json_to_csv(final_results, gt)
+
+    # Use final_results for summary statistics
+    results = final_results
 
     # ── Summary stats ─────────────────────────────────────────────────────────
     successes = [r for r in results if r.get("status") == "success"]

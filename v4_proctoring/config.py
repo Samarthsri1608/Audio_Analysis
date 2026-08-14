@@ -37,23 +37,24 @@ MIN_SPEECH_SECONDS: float = 2.0
 # Minimum total audio duration (seconds) — answers shorter than this are skipped.
 MIN_AUDIO_DURATION_SECONDS: float = 1.0
 
-# ── Track A — self-baseline deviation ─────────────────────────────────────────
+# ── Track A — self-baseline deviation (latency only) ─────────────────────────
 # Minimum number of the candidate's own evaluable answers before Track A fires.
 TRACK_A_MIN_ANSWERS: int = 3
-# Robust z-score threshold (max absolute z across features) to flag an answer.
-# UNCALIBRATED — tune against labeled data (78 High / 253 Low ground truth).
-TRACK_A_THRESHOLD: float = 3.5
 
-# Features used in Track A z-score (keys match AudioFeatures fields).
-TRACK_A_FEATURE_KEYS: list[str] = [
-    "f0_mean",
-    "f0_std",
-    "speech_rate_proxy",
-    "pause_ratio",
-    "response_latency",
-    "energy_mean",
-    "spectral_flatness_mean",
-]
+# Flagging threshold on the per-question latency robust z-score.
+# Operating point: ~74.5% recall, ~25% precision, ~72% flag rate on labeled set.
+# This is a review-filter threshold, NOT a final-verdict — tune when new labeled
+# data arrives. Set via env var TRACK_A_THRESHOLD to avoid code changes.
+TRACK_A_THRESHOLD: float = float(os.getenv("TRACK_A_THRESHOLD", "1.75"))
+
+# Z-score clip bounds — prevents blow-up when MAD is near-zero.
+# Raw z-scores are clipped to [-TRACK_A_Z_CLIP, TRACK_A_Z_CLIP] before flagging.
+TRACK_A_Z_CLIP: float = 8.0
+
+# Single feature used for Track A (response_latency only).
+# Multi-feature z-score was dropped: other features had AUC 0.51–0.58 (near noise)
+# and were diluting the one signal that actually works.
+TRACK_A_FEATURE_KEY: str = "response_latency"
 
 # ── Track C — naturalness / mechanism rules ───────────────────────────────────
 # Latency-fluency mismatch: long silence before answer + unusually smooth delivery

@@ -3,7 +3,7 @@ pipeline/corroboration.py — OR-gate corroboration logic and evidence payload b
 
 Implements spec §7:
 
-  flag_A = Track_A.deviation_score > threshold_A   (only if baseline exists)
+  flag_A = Track_A.deviation_score >= threshold_A   (only if baseline exists)
   flag_C = Track_C.any_signal_fires
 
   final_flag = flag_A OR flag_C
@@ -23,6 +23,12 @@ Also runs the full interview-level pipeline:
   - Iterates questions in order
   - Updates the InterviewBaseline after each evaluable answer
   - Returns the list of QuestionEvidencePayload objects
+
+Note on evaluability (item 5 / spec §8):
+  Every payload has evaluable explicitly True or False.
+  not_evaluable_reason is always populated when evaluable=False.
+  This is enforced here with a defensive fallback — the extractor should always
+  set it, but this layer guarantees it is never None on a non-evaluable row.
 """
 from __future__ import annotations
 
@@ -62,16 +68,19 @@ def _determine_confidence(
 
 def _build_contributing_features(
     features: AudioFeatures,
+    track_a: TrackAResult,
     track_c: TrackCResult,
 ) -> dict[str, Optional[float]]:
     """
     Build the contributing_features dict for the reviewer UI.
 
-    Only includes features that are directly interpretable by a human reviewer.
-    Does not dump the full feature vector — that would be overwhelming.
+    Surfaces the latency z-score alongside the raw feature values so a
+    reviewer can see both the signal and its magnitude in one place.
+    Does not dump the full feature vector — keeps it readable.
     """
     contrib: dict[str, Optional[float]] = {
         "response_latency_s": features.response_latency,
+        "latency_z_score": track_a.deviation_score if track_a.available else None,
         "spectral_flatness_mean": features.spectral_flatness_mean,
         "pause_ratio": features.pause_ratio,
         "f0_mean_hz": features.f0_mean,
@@ -130,7 +139,7 @@ def build_interview_evidence(
             # Update baseline AFTER scoring
             baseline.update(features)
 
-    # ── Step 3: Build evidence payloads ───────────────────────────────────────
+    # ── Step 3: Build evidence payloads ────────────────────────────────────
     payloads: list[QuestionEvidencePayload] = []
 
     for i, d in enumerate(question_data):
@@ -142,11 +151,15 @@ def build_interview_evidence(
 
         if not evaluability.evaluable:
             # Non-evaluable: produce an explicit reasoned payload (spec §8).
+            # BUG FIX (item 5): not_evaluable_reason must ALWAYS be set here.
+            # The extractor should have populated it, but we defensively
+            # guarantee a non-null value so the CSV/API never shows a blank.
+            reason = evaluability.not_evaluable_reason or "unknown"
             payloads.append(
                 QuestionEvidencePayload(
                     q_no=q_no,
                     evaluable=False,
-                    not_evaluable_reason=evaluability.not_evaluable_reason,
+                    not_evaluable_reason=reason,
                     flagged_for_review=False,
                     confidence="low",
                     track_a=None,
@@ -171,11 +184,13 @@ def build_interview_evidence(
 
         if final_flag:
             logger.info(
-                "Q%d FLAGGED — flag_a=%s, flag_c=%s, confidence=%s, cold_start=%s",
-                q_no, flag_a, flag_c, confidence, is_cold_start,
+                "Q%d FLAGGED — flag_a=%s (z=%.3f), flag_c=%s, confidence=%s, cold_start=%s",
+                q_no, flag_a,
+                ta.deviation_score if ta.available and ta.deviation_score is not None else 0.0,
+                flag_c, confidence, is_cold_start,
             )
 
-        contributing = _build_contributing_features(features, tc) if features else {}
+        contributing = _build_contributing_features(features, ta, tc) if features else {}
 
         payloads.append(
             QuestionEvidencePayload(
